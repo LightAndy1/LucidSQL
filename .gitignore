@@ -1,0 +1,56 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r\r
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode / Apple development
+build/
+DerivedData/
+*.moved-aside
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+.swiftpm/xcode/
+
+# Rust / Cargo
+/Core/target/
+target/
+**/*.rs.bk
+
+# Generated UniFFI / Bridge Artifacts
+/App/Bridge/Generated/
+
+# Local Secrets, Credentials & Certificates
+*.env
+*.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.cer
+*.crt
+*.pfx
+
+# Database dumps and local test databases
+*.dump
+*.sql.tar
+*.sql.gz
+*.sqlite
+*.sqlite3
+*.db
+
+# Local IDE & agent run caches
+.cursor/workspaceStorage/
+.idea/
+*.sublime-project
+*.sublime-workspace
