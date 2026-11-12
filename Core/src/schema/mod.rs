@@ -1,6 +1,12 @@
 pub mod introspection;
 pub use introspection::*;
 
+/// Returns true for PostgreSQL system/internal schemas that must be treated as read-only.
+pub fn is_system_schema(schema: &str) -> bool {
+    let lower = schema.trim().to_ascii_lowercase();
+    lower == "pg_catalog" || lower == "information_schema" || lower.starts_with("pg_")
+}
+
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct TableInfo {
     pub schema_name: String,

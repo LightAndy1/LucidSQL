@@ -1,40 +1,149 @@
-use std::collections::HashMap;
-use deadpool_postgres::Client;
+use std::collections::{HashMap, HashSet};
+use deadpool_postgres::{Client, GenericClient};
 use tokio_postgres::types::ToSql;
 
 use crate::error::LucidError;
 use crate::mutation::{BatchMutationRequest, BatchMutationResult};
 use crate::query::execute::map_postgres_error;
 use crate::query::CellValue;
-use crate::schema::introspection::query_columns;
+use crate::schema::is_system_schema;
 
 fn sanitize_identifier(ident: &str) -> String {
     ident.replace('"', "\"\"")
 }
 
-fn cell_value_to_param(val: &CellValue) -> Option<String> {
+fn format_cell_value_for_display(val: &CellValue) -> String {
     match val {
-        CellValue::Null => None,
-        CellValue::Text(s) => Some(s.clone()),
-        CellValue::Boolean(b) => Some(b.to_string()),
-        CellValue::Integer(i) => Some(i.to_string()),
-        CellValue::Decimal(s) => Some(s.clone()),
-        CellValue::Float(f) => Some(f.to_string()),
-        CellValue::TimestampWithTimeZone(s) => Some(s.clone()),
-        CellValue::TimestampWithoutTimeZone(s) => Some(s.clone()),
-        CellValue::Date(s) => Some(s.clone()),
-        CellValue::Time(s) => Some(s.clone()),
-        CellValue::Uuid(s) => Some(s.clone()),
-        CellValue::BinaryHex(s) => Some(s.clone()),
-        CellValue::Json(s) => Some(s.clone()),
-        CellValue::Unsupported(s) => Some(s.clone()),
+        CellValue::Null => "NULL".into(),
+        CellValue::Text(s) => format!("'{}'", s),
+        CellValue::Boolean(b) => b.to_string(),
+        CellValue::Integer(i) => i.to_string(),
+        CellValue::Decimal(s)
+        | CellValue::TimestampWithTimeZone(s)
+        | CellValue::TimestampWithoutTimeZone(s)
+        | CellValue::Date(s)
+        | CellValue::Time(s)
+        | CellValue::Uuid(s)
+        | CellValue::BinaryHex(s)
+        | CellValue::Json(s) => s.clone(),
+        CellValue::Float(f) => f.to_string(),
+        CellValue::Unsupported(reason) => format!("Unsupported({})", reason),
     }
+}
+
+fn cell_value_to_param(val: &CellValue, role: &str) -> Result<Option<String>, LucidError> {
+    match val {
+        CellValue::Null => Ok(None),
+        CellValue::Text(s) => Ok(Some(s.clone())),
+        CellValue::Boolean(b) => Ok(Some(b.to_string())),
+        CellValue::Integer(i) => Ok(Some(i.to_string())),
+        CellValue::Decimal(s) => Ok(Some(s.clone())),
+        CellValue::Float(f) => Ok(Some(f.to_string())),
+        CellValue::TimestampWithTimeZone(s) => Ok(Some(s.clone())),
+        CellValue::TimestampWithoutTimeZone(s) => Ok(Some(s.clone())),
+        CellValue::Date(s) => Ok(Some(s.clone())),
+        CellValue::Time(s) => Ok(Some(s.clone())),
+        CellValue::Uuid(s) => Ok(Some(s.clone())),
+        CellValue::BinaryHex(s) => Ok(Some(s.clone())),
+        CellValue::Json(s) => Ok(Some(s.clone())),
+        CellValue::Unsupported(reason) => Err(LucidError::DatabaseError {
+            code: "22023".into(),
+            message: format!(
+                "Cannot use unsupported {} value ({}) in table mutation.",
+                role, reason
+            ),
+            detail: None,
+        }),
+    }
+}
+
+struct MutationColumnInfo {
+    name: String,
+    type_schema: String,
+    type_name: String,
+    is_primary_key: bool,
+    is_generated: bool,
+}
+
+async fn load_mutation_target<C: GenericClient>(
+    client: &C,
+    schema: &str,
+    table: &str,
+) -> Result<(String, Vec<MutationColumnInfo>), LucidError> {
+    let rel_row = client
+        .query_opt(
+            r#"
+            SELECT c.relkind::text
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = $2
+            "#,
+            &[&schema, &table],
+        )
+        .await
+        .map_err(map_postgres_error)?;
+
+    let relkind: String = match rel_row {
+        Some(r) => r.get(0),
+        None => {
+            return Err(LucidError::DatabaseError {
+                code: "42P01".into(),
+                message: format!("Table '{}.{}' does not exist.", schema, table),
+                detail: None,
+            });
+        }
+    };
+
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                a.attname AS column_name,
+                tn.nspname AS type_schema,
+                t.typname AS type_name,
+                (pk.conkey IS NOT NULL AND a.attnum = ANY(pk.conkey)) AS is_pk,
+                COALESCE(a.attgenerated, '') != '' AS is_generated
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_type t ON t.oid = a.atttypid
+            JOIN pg_namespace tn ON tn.oid = t.typnamespace
+            LEFT JOIN pg_constraint pk ON pk.conrelid = c.oid AND pk.contype = 'p'
+            WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attnum ASC
+            "#,
+            &[&schema, &table],
+        )
+        .await
+        .map_err(map_postgres_error)?;
+
+    let cols = rows
+        .into_iter()
+        .map(|row| MutationColumnInfo {
+            name: row.get(0),
+            type_schema: row.get(1),
+            type_name: row.get(2),
+            is_primary_key: row.get(3),
+            is_generated: row.get(4),
+        })
+        .collect();
+
+    Ok((relkind, cols))
 }
 
 pub async fn execute_batch_mutation(
     client: &mut Client,
     req: BatchMutationRequest,
 ) -> Result<BatchMutationResult, LucidError> {
+    if is_system_schema(&req.schema_name) {
+        return Err(LucidError::ReadOnlyViolation {
+            attempted_operation: format!(
+                "System schema '{}' is read-only; catalog tables cannot be edited.",
+                req.schema_name
+            ),
+        });
+    }
+
     if req.mutations.is_empty() {
         return Ok(BatchMutationResult {
             rows_affected: 0,
@@ -44,9 +153,19 @@ pub async fn execute_batch_mutation(
 
     let tx = client.transaction().await.map_err(map_postgres_error)?;
 
-    // 1. Inspect table columns inside the transaction
-    let columns = query_columns(&tx, &req.schema_name, &req.table_name).await?;
-    let col_map: HashMap<String, &crate::schema::ColumnMetadata> =
+    // 1. Inspect target relation and columns inside the transaction
+    let (relkind, columns) = load_mutation_target(&tx, &req.schema_name, &req.table_name).await?;
+    if relkind != "r" && relkind != "p" {
+        let _ = tx.rollback().await;
+        return Err(LucidError::ReadOnlyViolation {
+            attempted_operation: format!(
+                "'{}.{}' is not an editable base table.",
+                req.schema_name, req.table_name
+            ),
+        });
+    }
+
+    let col_map: HashMap<String, &MutationColumnInfo> =
         columns.iter().map(|c| (c.name.clone(), c)).collect();
 
     let pk_cols: Vec<String> = columns
@@ -56,11 +175,13 @@ pub async fn execute_batch_mutation(
         .collect();
 
     if pk_cols.is_empty() {
+        let _ = tx.rollback().await;
         return Err(LucidError::MissingPrimaryKey {
             table_name: format!("{}.{}", req.schema_name, req.table_name),
         });
     }
 
+    let expected_pk_set: HashSet<&str> = pk_cols.iter().map(|s| s.as_str()).collect();
     let clean_schema = sanitize_identifier(&req.schema_name);
     let clean_table = sanitize_identifier(&req.table_name);
     let mut updated_xmins = Vec::with_capacity(req.mutations.len());
@@ -71,6 +192,7 @@ pub async fn execute_batch_mutation(
         }
 
         if m.updated_columns.len() != m.updated_values.len() {
+            let _ = tx.rollback().await;
             return Err(LucidError::DatabaseError {
                 code: "22023".into(),
                 message: format!(
@@ -83,11 +205,14 @@ pub async fn execute_batch_mutation(
             });
         }
 
-        if m.primary_key_columns.len() != m.primary_key_values.len() {
+        if m.primary_key_columns.is_empty()
+            || m.primary_key_columns.len() != m.primary_key_values.len()
+        {
+            let _ = tx.rollback().await;
             return Err(LucidError::DatabaseError {
                 code: "22023".into(),
                 message: format!(
-                    "Mutation at row {} has mismatched primary key columns ({}) and values ({})",
+                    "Mutation at row {} has invalid primary key columns ({}) or values ({}).",
                     idx + 1,
                     m.primary_key_columns.len(),
                     m.primary_key_values.len()
@@ -96,10 +221,39 @@ pub async fn execute_batch_mutation(
             });
         }
 
-        // Verify none of updated columns are generated or PK
+        let provided_pk_set: HashSet<&str> =
+            m.primary_key_columns.iter().map(|s| s.as_str()).collect();
+        if provided_pk_set != expected_pk_set {
+            let _ = tx.rollback().await;
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Mutation at row {} does not specify the complete primary key for '{}.{}'.",
+                    idx + 1,
+                    req.schema_name,
+                    req.table_name
+                ),
+                detail: None,
+            });
+        }
+
+        if m.original_xmin.is_empty() || !m.original_xmin.bytes().all(|b| b.is_ascii_digit()) {
+            let _ = tx.rollback().await;
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Mutation at row {} has a missing or invalid row version (xmin).",
+                    idx + 1
+                ),
+                detail: None,
+            });
+        }
+
+        // Verify none of updated columns are generated or missing
         for col_name in &m.updated_columns {
             if let Some(col_meta) = col_map.get(col_name) {
                 if col_meta.is_generated {
+                    let _ = tx.rollback().await;
                     return Err(LucidError::DatabaseError {
                         code: "428C9".into(),
                         message: format!(
@@ -110,6 +264,7 @@ pub async fn execute_batch_mutation(
                     });
                 }
             } else {
+                let _ = tx.rollback().await;
                 return Err(LucidError::DatabaseError {
                     code: "42703".into(),
                     message: format!(
@@ -128,12 +283,21 @@ pub async fn execute_batch_mutation(
         for (i, col_name) in m.updated_columns.iter().enumerate() {
             let col_meta = col_map.get(col_name).unwrap();
             let clean_col = sanitize_identifier(col_name);
+            let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
+            let clean_type_name = sanitize_identifier(&col_meta.type_name);
             let param_idx = i + 1;
             set_clauses.push(format!(
-                r#""{}" = CAST(${}::text AS "{}")"#,
-                clean_col, param_idx, col_meta.pg_type_name
+                r#""{}" = CAST(${}::text AS "{}"."{}")"#,
+                clean_col, param_idx, clean_type_schema, clean_type_name
             ));
-            params_storage.push(cell_value_to_param(&m.updated_values[i]));
+            let param = match cell_value_to_param(&m.updated_values[i], "column") {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            };
+            params_storage.push(param);
         }
 
         // Build WHERE clauses for primary keys
@@ -146,13 +310,30 @@ pub async fn execute_batch_mutation(
                 message: format!("Primary key column '{}' not found in table", pk_name),
                 detail: None,
             })?;
+            if matches!(m.primary_key_values[j], CellValue::Null) {
+                let _ = tx.rollback().await;
+                return Err(LucidError::DatabaseError {
+                    code: "22023".into(),
+                    message: format!("Primary key column '{}' cannot be NULL.", pk_name),
+                    detail: None,
+                });
+            }
+            let param = match cell_value_to_param(&m.primary_key_values[j], "primary key") {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            };
             let clean_pk = sanitize_identifier(pk_name);
+            let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
+            let clean_type_name = sanitize_identifier(&col_meta.type_name);
             let param_idx = param_offset + j + 1;
             where_clauses.push(format!(
-                r#""{}" = CAST(${}::text AS "{}")"#,
-                clean_pk, param_idx, col_meta.pg_type_name
+                r#""{}" = CAST(${}::text AS "{}"."{}")"#,
+                clean_pk, param_idx, clean_type_schema, clean_type_name
             ));
-            params_storage.push(cell_value_to_param(&m.primary_key_values[j]));
+            params_storage.push(param);
         }
 
         // Concurrency xmin check
@@ -173,9 +354,13 @@ pub async fn execute_batch_mutation(
             .map(|p| p as &(dyn ToSql + Sync))
             .collect();
 
-        let rows = tx.query(&sql, &params_refs).await.map_err(|e| {
-            map_postgres_error(e)
-        })?;
+        let rows = match tx.query(&sql, &params_refs).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(map_postgres_error(e));
+            }
+        };
 
         if rows.is_empty() {
             // Concurrent modification conflict detected!
@@ -183,14 +368,7 @@ pub async fn execute_batch_mutation(
             let pk_strs: Vec<String> = m
                 .primary_key_values
                 .iter()
-                .map(|v| match v {
-                    CellValue::Null => "NULL".into(),
-                    CellValue::Text(s) => format!("'{}'", s),
-                    CellValue::Integer(i) => i.to_string(),
-                    CellValue::Decimal(s) => s.clone(),
-                    CellValue::Boolean(b) => b.to_string(),
-                    _ => format!("{:?}", v),
-                })
+                .map(format_cell_value_for_display)
                 .collect();
 
             return Err(LucidError::ConflictDetected {
@@ -218,6 +396,7 @@ mod tests {
     use super::*;
     use crate::connection::ConnectionConfig;
     use crate::connection::ManagedPool;
+    use crate::mutation::RowMutation;
 
     fn get_test_config() -> ConnectionConfig {
         let user = std::env::var("USER").unwrap_or_else(|_| "postgres".into());
@@ -588,5 +767,182 @@ mod tests {
         assert_eq!(empty_val, Some("".into()));
 
         let _ = client.batch_execute(&format!(r#"DROP TABLE IF EXISTS "{}";"#, table_name)).await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_mutation_rejects_system_schemas() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let req = BatchMutationRequest {
+            schema_name: "pg_catalog".into(),
+            table_name: "pg_am".into(),
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["oid".into()],
+                primary_key_values: vec![CellValue::Integer(403)],
+                original_xmin: "1".into(),
+                updated_columns: vec!["amname".into()],
+                updated_values: vec![CellValue::Text("btree_hacked".into())],
+            }],
+        };
+
+        let res = execute_batch_mutation(&mut client, req).await;
+        assert!(matches!(res, Err(LucidError::ReadOnlyViolation { .. })));
+
+        let info_req = BatchMutationRequest {
+            schema_name: "information_schema".into(),
+            table_name: "tables".into(),
+            mutations: vec![],
+        };
+        let info_res = execute_batch_mutation(&mut client, info_req).await;
+        assert!(matches!(info_res, Err(LucidError::ReadOnlyViolation { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_batch_mutation_rejects_unsupported_pk_and_updated_values() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_unsupported_guard";
+        let table = "items";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TABLE "{}"."{}" (id oid PRIMARY KEY, label text);
+                INSERT INTO "{}"."{}" VALUES (403, 'original');
+                "#,
+                schema, schema, schema, table, schema, table
+            ))
+            .await
+            .unwrap();
+
+        let row = client
+            .query_one(&format!(r#"SELECT xmin::text FROM "{}"."{}" WHERE id = 403"#, schema, table), &[])
+            .await
+            .unwrap();
+        let xmin: String = row.get(0);
+
+        // Unsupported PK placeholder must never reach SQL
+        let bad_pk_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Unsupported("oid: raw display".into())],
+                original_xmin: xmin.clone(),
+                updated_columns: vec!["label".into()],
+                updated_values: vec![CellValue::Text("changed".into())],
+            }],
+        };
+        let bad_pk_res = execute_batch_mutation(&mut client, bad_pk_req).await;
+        assert!(matches!(
+            bad_pk_res,
+            Err(LucidError::DatabaseError { ref code, ref message, .. })
+                if code == "22023" && message.contains("unsupported primary key")
+        ));
+
+        // Unsupported updated value must never reach SQL
+        let bad_val_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(403)],
+                original_xmin: xmin,
+                updated_columns: vec!["label".into()],
+                updated_values: vec![CellValue::Unsupported("text: raw display".into())],
+            }],
+        };
+        let bad_val_res = execute_batch_mutation(&mut client, bad_val_req).await;
+        assert!(matches!(
+            bad_val_res,
+            Err(LucidError::DatabaseError { ref code, ref message, .. })
+                if code == "22023" && message.contains("unsupported column")
+        ));
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_mutation_custom_schema_composite_pk_high_precision_numeric() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_custom_schema";
+        let table = "ledger";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TYPE "{}"."entry_kind" AS ENUM ('credit', 'debit');
+                CREATE TABLE "{}"."{}" (
+                    tenant_id int NOT NULL,
+                    entry_id bigint NOT NULL,
+                    amount numeric(24, 10) NOT NULL,
+                    kind "{}"."entry_kind" NOT NULL,
+                    memo text,
+                    PRIMARY KEY (tenant_id, entry_id)
+                );
+                INSERT INTO "{}"."{}" VALUES (7, 9001, 123456789012.0000123456, 'credit', 'init');
+                "#,
+                schema, schema, schema, schema, table, schema, schema, table
+            ))
+            .await
+            .unwrap();
+
+        let page = crate::query::fetch_page(&client, schema, table, 0, 10, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        let xmin = match &page.rows[0].cells[0] {
+            CellValue::Text(s) => s.clone(),
+            other => panic!("Expected xmin Text, got {:?}", other),
+        };
+        assert_eq!(
+            page.rows[0].cells[3],
+            CellValue::Decimal("123456789012.0000123456".into())
+        );
+        assert_eq!(page.rows[0].cells[4], CellValue::Text("credit".into()));
+
+        let req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["tenant_id".into(), "entry_id".into()],
+                primary_key_values: vec![CellValue::Integer(7), CellValue::Integer(9001)],
+                original_xmin: xmin,
+                updated_columns: vec!["amount".into(), "kind".into(), "memo".into()],
+                updated_values: vec![
+                    CellValue::Decimal("987654321098.9876543210".into()),
+                    CellValue::Text("debit".into()),
+                    CellValue::Null,
+                ],
+            }],
+        };
+
+        let res = execute_batch_mutation(&mut client, req).await.unwrap();
+        assert_eq!(res.rows_affected, 1);
+
+        let page_after = crate::query::fetch_page(&client, schema, table, 0, 10, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            page_after.rows[0].cells[3],
+            CellValue::Decimal("987654321098.9876543210".into())
+        );
+        assert_eq!(page_after.rows[0].cells[4], CellValue::Text("debit".into()));
+        assert_eq!(page_after.rows[0].cells[5], CellValue::Null);
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
     }
 }

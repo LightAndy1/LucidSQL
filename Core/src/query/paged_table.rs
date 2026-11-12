@@ -1,5 +1,6 @@
 use super::{map_cell_value, RecordPage, RowData};
 use crate::error::LucidError;
+use crate::query::execute::map_postgres_error;
 use deadpool_postgres::Client;
 
 pub async fn fetch_page(
@@ -41,11 +42,7 @@ pub async fn fetch_page(
     let rows = client
         .query(&sql, &[&(limit as i64), &(offset as i64)])
         .await
-        .map_err(|e| LucidError::DatabaseError {
-            code: "42000".into(),
-            message: e.to_string(),
-            detail: None,
-        })?;
+        .map_err(map_postgres_error)?;
 
     let mut record_rows = Vec::new();
     for row in &rows {

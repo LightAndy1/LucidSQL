@@ -136,6 +136,27 @@ public struct StagedChangesReviewSheet: View {
             .padding(8)
             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
 
+            if let error = viewModel.errorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.system(size: 12))
+                        .padding(.top, 1)
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.red.opacity(0.25), lineWidth: 1)
+                )
+            }
+
             Divider()
 
             // Footer Actions
@@ -147,6 +168,18 @@ public struct StagedChangesReviewSheet: View {
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
                 .disabled(viewModel.isApplying)
+
+                if viewModel.errorMessage != nil {
+                    Button("Discard & Reload") {
+                        Task {
+                            await viewModel.discardAndReload(config: config)
+                            dismiss()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .disabled(viewModel.isApplying)
+                }
 
                 Spacer()
 

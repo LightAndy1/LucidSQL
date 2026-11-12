@@ -1,4 +1,5 @@
 use crate::error::LucidError;
+use crate::query::execute::map_postgres_error;
 use super::{ColumnMetadata, TableInfo};
 use deadpool_postgres::GenericClient;
 
@@ -13,11 +14,7 @@ pub async fn query_schemas<C: GenericClient>(client: &C) -> Result<Vec<String>, 
     let rows = client
         .query(sql, &[])
         .await
-        .map_err(|e| LucidError::DatabaseError {
-            code: "42000".into(),
-            message: e.to_string(),
-            detail: None,
-        })?;
+        .map_err(map_postgres_error)?;
 
     Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
 }
@@ -37,11 +34,7 @@ pub async fn query_tables<C: GenericClient>(client: &C, schema: &str) -> Result<
     let rows = client
         .query(sql, &[&schema])
         .await
-        .map_err(|e| LucidError::DatabaseError {
-            code: "42000".into(),
-            message: e.to_string(),
-            detail: None,
-        })?;
+        .map_err(map_postgres_error)?;
 
     let mut tables = Vec::new();
     for row in rows {
@@ -82,11 +75,7 @@ pub async fn query_columns<C: GenericClient>(
     let rows = client
         .query(sql, &[&schema, &table])
         .await
-        .map_err(|e| LucidError::DatabaseError {
-            code: "42000".into(),
-            message: e.to_string(),
-            detail: None,
-        })?;
+        .map_err(map_postgres_error)?;
 
     let mut columns = Vec::new();
     for row in rows {

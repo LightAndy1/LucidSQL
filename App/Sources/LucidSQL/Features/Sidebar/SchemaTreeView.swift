@@ -30,7 +30,7 @@ public final class SchemaTreeModel: ObservableObject {
             }
             self.isLoading = false
         } catch {
-            self.errorMessage = error.localizedDescription
+            self.errorMessage = error.userFacingMessage
             self.isLoading = false
         }
     }
@@ -40,7 +40,7 @@ public final class SchemaTreeModel: ObservableObject {
             let tables = try await introspect_tables(config: config, schema: schema)
             self.tablesBySchema[schema] = tables
         } catch {
-            self.errorMessage = error.localizedDescription
+            self.errorMessage = error.userFacingMessage
         }
     }
 
@@ -63,15 +63,18 @@ public final class SchemaTreeModel: ObservableObject {
 
 public struct SchemaTreeView: View {
     @StateObject private var model: SchemaTreeModel
+    private let activeTableKey: String?
     private let onOpenSqlEditor: (() -> Void)?
     private let onSelectTable: (String, String) -> Void
 
     public init(
         config: ConnectionConfig,
+        activeTableKey: String? = nil,
         onOpenSqlEditor: (() -> Void)? = nil,
         onSelectTable: @escaping (String, String) -> Void
     ) {
         _model = StateObject(wrappedValue: SchemaTreeModel(config: config))
+        self.activeTableKey = activeTableKey
         self.onOpenSqlEditor = onOpenSqlEditor
         self.onSelectTable = onSelectTable
     }
@@ -202,7 +205,6 @@ public struct SchemaTreeView: View {
                             } else {
                                 ForEach(tables, id: \.tableName) { table in
                                     Button {
-                                        model.selectedTableKey = "\(schema).\(table.tableName)"
                                         onSelectTable(schema, table.tableName)
                                     } label: {
                                         HStack(spacing: 6) {
@@ -254,6 +256,9 @@ public struct SchemaTreeView: View {
         }
         .task {
             await model.loadSchemas()
+        }
+        .onChange(of: activeTableKey) { _, newValue in
+            model.selectedTableKey = (newValue?.isEmpty == false) ? newValue : nil
         }
     }
 

@@ -56,10 +56,10 @@ final class ConnectionDialogModel: ObservableObject {
             testResultMessage = "Connected successfully: \(version)"
             testResultIsError = false
         } catch let error as LucidError {
-            testResultMessage = error.localizedDescription
+            testResultMessage = error.userFacingMessage
             testResultIsError = true
         } catch {
-            testResultMessage = error.localizedDescription
+            testResultMessage = error.userFacingMessage
             testResultIsError = true
         }
 

@@ -8,6 +8,7 @@ public final class TableDataViewModel: @unchecked Sendable {
     public var currentTable: String = ""
     public var columns: [ColumnMetadata] = []
     public var rows: [RowData] = []
+    public private(set) var dataVersion: UInt64 = 0
     public var offset: UInt64 = 0
     public var limit: UInt32 = 100
     public var hasMore: Bool = false
@@ -67,13 +68,21 @@ public final class TableDataViewModel: @unchecked Sendable {
         columns.contains { $0.isPrimaryKey }
     }
 
+    public var isSystemSchema: Bool {
+        let lower = currentSchema.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower == "pg_catalog" || lower == "information_schema" || lower.hasPrefix("pg_")
+    }
+
     public var isEditable: Bool {
-        hasPrimaryKey && !isReadOnly
+        hasPrimaryKey && !isReadOnly && !isSystemSchema
     }
 
     public var nonEditableReason: String? {
         if isReadOnly {
             return "Read-only guardrail is active. Editing is disabled."
+        }
+        if isSystemSchema {
+            return "System schema '\(currentSchema)' is read-only. Catalog tables cannot be edited."
         }
         if !hasPrimaryKey && !columns.isEmpty {
             return "Table has no primary key. In-grid editing requires a primary key for safe row identity."
@@ -83,6 +92,63 @@ public final class TableDataViewModel: @unchecked Sendable {
 
     public var stagedRowsCount: Int {
         Set(stagedEdits.keys.map(\.row)).count
+    }
+
+    public func originalCellValue(row: Int, column: Int) -> CellValue? {
+        guard row >= 0, row < rows.count, column >= 0, column < columns.count else {
+            return nil
+        }
+        let rawRow = rows[row]
+        let rawColIdx = hasPrimaryKey ? (column + 1) : column
+        guard rawColIdx < rawRow.cells.count else { return nil }
+        return rawRow.cells[rawColIdx]
+    }
+
+    public func rowXmin(row: Int) -> String? {
+        guard hasPrimaryKey, row >= 0, row < rows.count else { return nil }
+        guard let xmin = rows[row].cells.first?.rawTextValue,
+              !xmin.isEmpty,
+              xmin.allSatisfy(\.isASCII),
+              xmin.allSatisfy(\.isNumber) else {
+            return nil
+        }
+        return xmin
+    }
+
+    public func isRowIdentifiable(row: Int) -> Bool {
+        guard hasPrimaryKey, rowXmin(row: row) != nil else { return false }
+        let pkIndices = columns.indices.filter { columns[$0].isPrimaryKey }
+        guard !pkIndices.isEmpty else { return false }
+        for pkIdx in pkIndices {
+            guard let pkVal = originalCellValue(row: row, column: pkIdx),
+                  !pkVal.isNull,
+                  !pkVal.isUnsupported else {
+                return false
+            }
+        }
+        return true
+    }
+
+    public func isCellEditable(row: Int, column: Int) -> Bool {
+        guard isEditable, row >= 0, row < rows.count, column >= 0, column < columns.count else {
+            return false
+        }
+        if columns[column].isGenerated {
+            return false
+        }
+        guard isRowIdentifiable(row: row) else {
+            return false
+        }
+        if let orig = originalCellValue(row: row, column: column), orig.isUnsupported {
+            return false
+        }
+        return true
+    }
+
+    public func canSetNull(row: Int, column: Int) -> Bool {
+        guard isCellEditable(row: row, column: column) else { return false }
+        let col = columns[column]
+        return col.isNullable && !col.isPrimaryKey
     }
 
     public var stagedDiffs: [StagedEditDiff] {
@@ -151,11 +217,16 @@ public final class TableDataViewModel: @unchecked Sendable {
             self.rows = page.rows
             self.hasMore = page.hasMore
             self.executionDurationMs = page.executionDurationMs
+            self.dataVersion &+= 1
             self.isLoading = false
         } catch {
-            self.errorMessage = error.localizedDescription
+            self.errorMessage = error.userFacingMessage
             self.isLoading = false
         }
+    }
+
+    public func notifyRowsUpdated() {
+        dataVersion &+= 1
     }
 
     public func nextPage(config: ConnectionConfig) {
@@ -183,6 +254,14 @@ public final class TableDataViewModel: @unchecked Sendable {
         }
     }
 
+    public func discardAndReload(config: ConnectionConfig) async {
+        stagedEdits.removeAll()
+        errorMessage = nil
+        statusMessage = nil
+        showingReviewSheet = false
+        await fetchPage(config: config)
+    }
+
     public func safeNavigate(action: @escaping () -> Void) {
         if stagedEdits.isEmpty {
             action()
@@ -206,25 +285,33 @@ public final class TableDataViewModel: @unchecked Sendable {
     }
 
     public func stageTextEdit(row: Int, column: Int, text: String) {
-        guard isEditable, column < columns.count else { return }
+        guard isCellEditable(row: row, column: column) else { return }
         let col = columns[column]
-        guard !col.isGenerated else { return }
-
         let parsed = parseCellValue(text: text, column: col)
-        stagedEdits[GridCoordinate(row: row, column: column)] = parsed
+        stageParsedValue(row: row, column: column, value: parsed)
     }
 
     public func stageNullEdit(row: Int, column: Int) {
-        guard isEditable, column < columns.count else { return }
-        let col = columns[column]
-        guard !col.isGenerated else { return }
-
-        stagedEdits[GridCoordinate(row: row, column: column)] = .null
+        guard canSetNull(row: row, column: column) else { return }
+        stageParsedValue(row: row, column: column, value: .null)
     }
 
     public func setCellValue(row: Int, column: Int, value: CellValue) {
-        guard isEditable else { return }
-        stagedEdits[GridCoordinate(row: row, column: column)] = value
+        guard isEditable, !value.isUnsupported else { return }
+        if !rows.isEmpty {
+            guard isCellEditable(row: row, column: column) else { return }
+            if value.isNull, !canSetNull(row: row, column: column) { return }
+        }
+        stageParsedValue(row: row, column: column, value: value)
+    }
+
+    private func stageParsedValue(row: Int, column: Int, value: CellValue) {
+        let coord = GridCoordinate(row: row, column: column)
+        if let orig = originalCellValue(row: row, column: column), orig == value {
+            stagedEdits.removeValue(forKey: coord)
+        } else {
+            stagedEdits[coord] = value
+        }
     }
 
     public func discardChanges() {
@@ -236,7 +323,7 @@ public final class TableDataViewModel: @unchecked Sendable {
     }
 
     public func buildBatchMutationRequest() -> BatchMutationRequest? {
-        guard hasPrimaryKey, !stagedEdits.isEmpty else { return nil }
+        guard isEditable, !stagedEdits.isEmpty else { return nil }
 
         let pkCols = columns.filter { $0.isPrimaryKey }
         guard !pkCols.isEmpty else { return nil }
@@ -244,30 +331,33 @@ public final class TableDataViewModel: @unchecked Sendable {
         // Group edits by row
         var rowEdits: [Int: [(colIdx: Int, value: CellValue)]] = [:]
         for (coord, val) in stagedEdits {
+            guard !val.isUnsupported else { return nil }
             rowEdits[coord.row, default: []].append((coord.column, val))
         }
 
         var mutations: [RowMutation] = []
-        for (rowIdx, edits) in rowEdits {
+        for (rowIdx, edits) in rowEdits.sorted(by: { $0.key < $1.key }) {
             guard rowIdx < rows.count else { continue }
-            let rawRow = rows[rowIdx]
-
-            // xmin is at cells[0] because has_pk is true
-            let xminStr = rawRow.cells.first?.displayString ?? ""
+            guard let xminStr = rowXmin(row: rowIdx) else {
+                return nil
+            }
 
             var pkNames: [String] = []
             var pkValues: [CellValue] = []
             for pkCol in pkCols {
-                if let pkIdx = columns.firstIndex(where: { $0.name == pkCol.name }) {
-                    pkNames.append(pkCol.name)
-                    let cellVal = (pkIdx + 1 < rawRow.cells.count) ? rawRow.cells[pkIdx + 1] : .null
-                    pkValues.append(cellVal)
+                guard let pkIdx = columns.firstIndex(where: { $0.name == pkCol.name }),
+                      let cellVal = originalCellValue(row: rowIdx, column: pkIdx),
+                      !cellVal.isNull,
+                      !cellVal.isUnsupported else {
+                    return nil
                 }
+                pkNames.append(pkCol.name)
+                pkValues.append(cellVal)
             }
 
             var updatedCols: [String] = []
             var updatedVals: [CellValue] = []
-            for edit in edits {
+            for edit in edits.sorted(by: { $0.colIdx < $1.colIdx }) {
                 guard edit.colIdx < columns.count else { continue }
                 let col = columns[edit.colIdx]
                 if col.isGenerated { continue }
@@ -286,6 +376,8 @@ public final class TableDataViewModel: @unchecked Sendable {
             }
         }
 
+        guard !mutations.isEmpty else { return nil }
+
         return BatchMutationRequest(
             schemaName: currentSchema,
             tableName: currentTable,
@@ -294,7 +386,19 @@ public final class TableDataViewModel: @unchecked Sendable {
     }
 
     public func applyStagedEdits(config: ConnectionConfig) async {
+        guard !stagedEdits.isEmpty else { return }
+
+        if isReadOnly {
+            self.errorMessage = "Read-only guardrail is active. Mutations are disabled."
+            return
+        }
+        if isSystemSchema {
+            self.errorMessage = "System schema '\(currentSchema)' is read-only. Catalog tables cannot be edited."
+            return
+        }
+
         guard let request = buildBatchMutationRequest(), !request.mutations.isEmpty else {
+            self.errorMessage = "Cannot apply edits: selected rows lack valid primary key or version identity."
             return
         }
 
@@ -308,15 +412,12 @@ public final class TableDataViewModel: @unchecked Sendable {
             self.isApplying = false
             self.showingReviewSheet = false
             await fetchPage(config: config)
-        } catch let LucidError.ConflictDetected(tableName, pkVals) {
+        } catch let error as LucidError {
             self.isApplying = false
-            self.errorMessage = "Conflict detected in table \(tableName): row with key (\(pkVals.joined(separator: ", "))) was modified or deleted by another transaction. All changes were rolled back to prevent overwriting."
-        } catch let LucidError.ReadOnlyViolation(op) {
-            self.isApplying = false
-            self.errorMessage = "Read-only guardrail violation: \(op)"
+            self.errorMessage = error.userFacingMessage
         } catch {
             self.isApplying = false
-            self.errorMessage = "Failed to apply changes: \(error.localizedDescription)"
+            self.errorMessage = "Failed to apply changes: \(error.userFacingMessage)"
         }
     }
 
@@ -333,8 +434,14 @@ public final class TableDataViewModel: @unchecked Sendable {
             }
         }
 
-        // 2. Integers (int2, int4, int8, smallint, integer, bigint, serial)
-        if lowerType.contains("int") || lowerType == "serial" || lowerType == "bigserial" {
+        // 2. Integers (exact integer / oid types only; avoid matching "point" or "interval")
+        let intTypes: Set<String> = [
+            "int2", "int4", "int8",
+            "smallint", "integer", "bigint",
+            "serial", "serial2", "serial4", "serial8",
+            "smallserial", "bigserial", "oid"
+        ]
+        if intTypes.contains(lowerType) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if let val = Int64(trimmed) {
                 return .integer(val)
@@ -348,7 +455,7 @@ public final class TableDataViewModel: @unchecked Sendable {
         }
 
         // 4. Floating point (float4, float8, real, double precision)
-        if lowerType.contains("float") || lowerType == "real" || lowerType.contains("double") {
+        if lowerType == "float4" || lowerType == "float8" || lowerType == "real" || lowerType == "double precision" {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if let val = Double(trimmed) {
                 return .float(val)
@@ -371,7 +478,7 @@ public final class TableDataViewModel: @unchecked Sendable {
         }
 
         // 8. Time
-        if lowerType.contains("time") && !lowerType.contains("timestamp") {
+        if lowerType == "time" || lowerType == "timetz" || lowerType == "time without time zone" || lowerType == "time with time zone" {
             return .time(text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 

@@ -4,10 +4,16 @@ import LucidSQLBridge
 public struct TableDataContainerView: View {
     @Bindable public var viewModel: TableDataViewModel
     public let config: ConnectionConfig
+    public let onToggleReadOnly: (() -> Void)?
 
-    public init(viewModel: TableDataViewModel, config: ConnectionConfig) {
+    public init(
+        viewModel: TableDataViewModel,
+        config: ConnectionConfig,
+        onToggleReadOnly: (() -> Void)? = nil
+    ) {
         self.viewModel = viewModel
         self.config = config
+        self.onToggleReadOnly = onToggleReadOnly
     }
 
     public var body: some View {
@@ -30,7 +36,19 @@ public struct TableDataContainerView: View {
                         .padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.12), in: Capsule())
 
-                    if viewModel.hasPrimaryKey {
+                    if viewModel.isSystemSchema {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8))
+                            Text("System (Read-Only)")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.1), in: Capsule())
+                        .help("PostgreSQL system catalogs and schemas are read-only and cannot be edited.")
+                    } else if viewModel.hasPrimaryKey {
                         HStack(spacing: 3) {
                             Image(systemName: "key.fill")
                                 .font(.system(size: 8))
@@ -55,7 +73,26 @@ public struct TableDataContainerView: View {
                         .help("This table does not have a primary key. In-grid editing requires a primary key for safe row identity.")
                     }
 
-                    if viewModel.isReadOnly {
+                    if let onToggleReadOnly {
+                        Button {
+                            onToggleReadOnly()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: viewModel.isReadOnly ? "lock.fill" : "lock.open")
+                                    .font(.system(size: 9))
+                                Text(viewModel.isReadOnly ? "Read-Only" : "Read-Write")
+                                    .font(.system(size: 9, weight: .medium))
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(viewModel.isReadOnly ? Color.orange.opacity(0.15) : Color.secondary.opacity(0.1), in: Capsule())
+                            .foregroundStyle(viewModel.isReadOnly ? Color.orange : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(viewModel.isReadOnly
+                            ? "Read-only guardrail is active. Click to switch to Read-Write."
+                            : "Click to enable read-only guardrail (disables table mutations)")
+                    } else if viewModel.isReadOnly {
                         HStack(spacing: 3) {
                             Image(systemName: "lock.shield.fill")
                                 .font(.system(size: 8))
@@ -88,8 +125,10 @@ public struct TableDataContainerView: View {
                             icon: "checkmark",
                             size: .small
                         ) {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
                             viewModel.showingReviewSheet = true
                         }
+                        .disabled(viewModel.isReadOnly || viewModel.isSystemSchema || viewModel.isApplying)
                         .help("Review and atomically apply staged edits")
                     }
                     .padding(.trailing, 4)
@@ -243,6 +282,12 @@ public struct TableDataContainerView: View {
                     Text("Double-click or Enter to edit • ⎋ to cancel • ⌥⌘N for NULL")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
+                } else if let reason = viewModel.nonEditableReason {
+                    Text(reason)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
 
                 Spacer()

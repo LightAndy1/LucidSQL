@@ -17,7 +17,24 @@ public final class WorkspaceModel: ObservableObject {
     public var tableViewModel = TableDataViewModel()
     public var sqlEditorViewModel = SqlEditorViewModel()
 
-    public init() {}
+    public init() {
+        bindReadOnlySync()
+    }
+
+    private func bindReadOnlySync() {
+        sqlEditorViewModel.onReadOnlyChanged = { [weak self] newValue in
+            self?.tableViewModel.isReadOnly = newValue
+        }
+    }
+
+    public func toggleReadOnly() {
+        guard let config = activeConfig else { return }
+        if sqlEditorViewModel.transactionStatus == .inTransaction {
+            tableViewModel.errorMessage = "Cannot toggle read-only mode while inside an active SQL Editor transaction. Commit or rollback first."
+            return
+        }
+        sqlEditorViewModel.toggleReadOnly(config: config)
+    }
 
     public func connect(profile: ConnectionProfile, password: String?) {
         self.activeProfile = profile
@@ -41,12 +58,14 @@ public final class WorkspaceModel: ObservableObject {
     public func disconnect() {
         tableViewModel.safeNavigate { [weak self] in
             guard let self = self else { return }
+            let currentReadOnly = self.sqlEditorViewModel.isReadOnly
             self.sqlEditorViewModel.reset()
             self.activeProfile = nil
             self.activeConfig = nil
             self.selectedTable = ""
             self.currentMode = .sqlEditor
             self.tableViewModel = TableDataViewModel()
+            self.tableViewModel.isReadOnly = currentReadOnly
         }
     }
 }
@@ -62,9 +81,13 @@ public struct WorkspaceView: View {
             // Grounded Sidebar Column
             Group {
                 if let config = model.activeConfig {
-                    SchemaTreeView(config: config, onOpenSqlEditor: {
-                        model.currentMode = .sqlEditor
-                    }) { schema, table in
+                    SchemaTreeView(
+                        config: config,
+                        activeTableKey: model.selectedTable,
+                        onOpenSqlEditor: {
+                            model.currentMode = .sqlEditor
+                        }
+                    ) { schema, table in
                         Task {
                             await model.loadTable(schema: schema, table: table)
                         }
@@ -100,7 +123,13 @@ public struct WorkspaceView: View {
                         SqlEditorContainerView(viewModel: model.sqlEditorViewModel, config: config)
                     case .tableData:
                         if !model.selectedTable.isEmpty {
-                            TableDataContainerView(viewModel: model.tableViewModel, config: config)
+                            TableDataContainerView(
+                                viewModel: model.tableViewModel,
+                                config: config,
+                                onToggleReadOnly: {
+                                    model.toggleReadOnly()
+                                }
+                            )
                         } else {
                             VStack(spacing: 16) {
                                 Spacer()

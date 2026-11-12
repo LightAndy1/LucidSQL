@@ -185,6 +185,15 @@ pub async fn apply_table_mutations(
         });
     }
 
+    if schema::is_system_schema(&request.schema_name) {
+        return Err(LucidError::ReadOnlyViolation {
+            attempted_operation: format!(
+                "System schema '{}' is read-only; catalog tables cannot be edited.",
+                request.schema_name
+            ),
+        });
+    }
+
     get_runtime()
         .spawn(async move {
             let pool = connection::ManagedPool::new(&config)?;

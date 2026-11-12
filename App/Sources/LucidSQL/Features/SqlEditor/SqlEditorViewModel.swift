@@ -32,6 +32,7 @@ public final class SqlEditorViewModel: @unchecked Sendable {
     public var sessionId: String = UUID().uuidString
     public var transactionStatus: TransactionStatus = .idle
     public var isReadOnly: Bool = false
+    public var onReadOnlyChanged: ((Bool) -> Void)? = nil
 
     private var executionTask: Task<Void, Never>? = nil
 
@@ -99,14 +100,14 @@ public final class SqlEditorViewModel: @unchecked Sendable {
                     case .ReadOnlyViolation(let op):
                         self.queryState = .error("Read-Only Mode: \(op)")
                     default:
-                        self.queryState = .error(error.localizedDescription)
+                        self.queryState = .error(error.userFacingMessage)
                     }
                 }
             } catch {
                 await MainActor.run {
                     guard let self = self, self.activeQueryId == queryId else { return }
                     self.activeQueryId = nil
-                    self.queryState = .error(error.localizedDescription)
+                    self.queryState = .error(error.userFacingMessage)
                 }
             }
         }
@@ -143,11 +144,13 @@ public final class SqlEditorViewModel: @unchecked Sendable {
                 _ = try await set_session_read_only(sessionId: currentSessionId, readOnly: newSetting)
                 await MainActor.run {
                     self.isReadOnly = newSetting
+                    self.onReadOnlyChanged?(newSetting)
                 }
             } catch {
                 // If session is not yet established, update locally so the next query initializes read-only
                 await MainActor.run {
                     self.isReadOnly = newSetting
+                    self.onReadOnlyChanged?(newSetting)
                 }
             }
         }
