@@ -22,21 +22,33 @@ public struct GlassSurface<Content: View>: View {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(Color(NSColor.separatorColor), lineWidth: 0.5)
                 )
-        } else if #available(macOS 26.0, *) {
-            NativeGlassContainer(cornerRadius: cornerRadius) {
-                content
-            }
         } else {
-            content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(Color(NSColor.separatorColor).opacity(0.3), lineWidth: 0.5)
-                )
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                NativeGlassContainer(cornerRadius: cornerRadius) {
+                    content
+                }
+            } else {
+                materialFallback
+            }
+            #else
+            materialFallback
+            #endif
         }
+    }
+
+    @ViewBuilder
+    private var materialFallback: some View {
+        content
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color(NSColor.separatorColor).opacity(0.3), lineWidth: 0.5)
+            )
     }
 }
 
+#if compiler(>=6.2)
 @available(macOS 26.0, *)
 private struct NativeGlassContainer<Content: View>: NSViewRepresentable {
     let cornerRadius: CGFloat
@@ -67,3 +79,4 @@ private struct NativeGlassContainer<Content: View>: NSViewRepresentable {
         }
     }
 }
+#endif

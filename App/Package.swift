@@ -2,16 +2,35 @@
 import PackageDescription
 import Foundation
 
-let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? "/Library/Developer/CommandLineTools"
-let testingMacroCandidates = [
-    "\(developerDir)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib",
-    "\(developerDir)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
-]
-let resolvedTestingMacroPath = testingMacroCandidates.first { FileManager.default.fileExists(atPath: $0) }
+func resolveActiveDeveloperDir() -> String {
+    if let envDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !envDir.isEmpty {
+        return envDir
+    }
+    let pipe = Pipe()
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+    process.arguments = ["-p"]
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    if (try? process.run()) != nil {
+        process.waitUntilExit()
+        if process.terminationStatus == 0,
+           let raw = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw
+        }
+    }
+    return "/Library/Developer/CommandLineTools"
+}
+
+let activeDeveloperDir = resolveActiveDeveloperDir()
+let testingMacroPath = "\(activeDeveloperDir)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
 let testSwiftSettings: [SwiftSetting] = {
     var settings: [SwiftSetting] = [.swiftLanguageMode(.v6)]
-    if let resolvedTestingMacroPath {
-        settings.append(.unsafeFlags(["-load-plugin-library", resolvedTestingMacroPath]))
+    if activeDeveloperDir.contains("CommandLineTools"),
+       FileManager.default.fileExists(atPath: testingMacroPath) {
+        settings.append(.unsafeFlags(["-load-plugin-library", testingMacroPath]))
     }
     return settings
 }()

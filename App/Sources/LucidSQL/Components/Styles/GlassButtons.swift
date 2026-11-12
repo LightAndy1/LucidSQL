@@ -22,6 +22,7 @@ public struct PrimaryActionButton: View {
     }
 
     public var body: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Button(action: action) {
                 buttonLabel
@@ -30,13 +31,21 @@ public struct PrimaryActionButton: View {
             .buttonBorderShape(.capsule)
             .controlSize(size)
         } else {
-            Button(action: action) {
-                buttonLabel
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .controlSize(size)
+            fallbackButton
         }
+        #else
+        fallbackButton
+        #endif
+    }
+
+    @ViewBuilder
+    private var fallbackButton: some View {
+        Button(action: action) {
+            buttonLabel
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .controlSize(size)
     }
 
     @ViewBuilder
@@ -70,6 +79,7 @@ public struct SecondaryActionButton: View {
     }
 
     public var body: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Button(action: action) {
                 buttonLabel
@@ -78,13 +88,21 @@ public struct SecondaryActionButton: View {
             .buttonBorderShape(.capsule)
             .controlSize(size)
         } else {
-            Button(action: action) {
-                buttonLabel
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .controlSize(size)
+            fallbackButton
         }
+        #else
+        fallbackButton
+        #endif
+    }
+
+    @ViewBuilder
+    private var fallbackButton: some View {
+        Button(action: action) {
+            buttonLabel
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .controlSize(size)
     }
 
     @ViewBuilder

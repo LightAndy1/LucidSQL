@@ -4,6 +4,7 @@ public struct PrimaryGlassButtonStyle: ViewModifier {
     public init() {}
 
     public func body(content: Content) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content
                 .buttonStyle(.glassProminent)
@@ -11,6 +12,10 @@ public struct PrimaryGlassButtonStyle: ViewModifier {
             content
                 .buttonStyle(.borderedProminent)
         }
+        #else
+        content
+            .buttonStyle(.borderedProminent)
+        #endif
     }
 }
 

@@ -876,11 +876,17 @@ private struct WorkspaceDetailBackground: View {
     var body: some View {
         if reduceTransparency {
             Color(NSColor.controlBackgroundColor)
-        } else if #available(macOS 26.0, *) {
-            Color.clear
-                .glassEffect(.regular, in: Rectangle())
         } else {
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                Color.clear
+                    .glassEffect(.regular, in: Rectangle())
+            } else {
+                VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
+            }
+            #else
             VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
+            #endif
         }
     }
 }
