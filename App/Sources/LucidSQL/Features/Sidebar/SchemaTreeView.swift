@@ -63,10 +63,16 @@ public final class SchemaTreeModel: ObservableObject {
 
 public struct SchemaTreeView: View {
     @StateObject private var model: SchemaTreeModel
+    private let onOpenSqlEditor: (() -> Void)?
     private let onSelectTable: (String, String) -> Void
 
-    public init(config: ConnectionConfig, onSelectTable: @escaping (String, String) -> Void) {
+    public init(
+        config: ConnectionConfig,
+        onOpenSqlEditor: (() -> Void)? = nil,
+        onSelectTable: @escaping (String, String) -> Void
+    ) {
         _model = StateObject(wrappedValue: SchemaTreeModel(config: config))
+        self.onOpenSqlEditor = onOpenSqlEditor
         self.onSelectTable = onSelectTable
     }
 
@@ -95,6 +101,18 @@ public struct SchemaTreeView: View {
                     }
 
                     Spacer()
+
+                    if let onOpen = onOpenSqlEditor {
+                        Button {
+                            onOpen()
+                        } label: {
+                            Image(systemName: "terminal")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Open SQL Editor (⌘T)")
+                    }
 
                     if model.isLoading {
                         ProgressView().controlSize(.small)

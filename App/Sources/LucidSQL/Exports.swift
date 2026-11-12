@@ -7,6 +7,7 @@ extension TableInfo: @unchecked Sendable {}
 extension RecordPage: @unchecked Sendable {}
 extension RowData: @unchecked Sendable {}
 extension CellValue: @unchecked Sendable {}
+extension QueryResult: @unchecked Sendable {}
 
 // Provide snake_case aliases matching Rust/plan spec
 public func bridge_ping() -> String {
@@ -47,4 +48,17 @@ public func fetch_table_page(
     sortDesc: Bool = false
 ) async throws -> RecordPage {
     try await fetchTablePage(config: config, schema: schema, table: table, offset: offset, limit: limit, sortCol: sortCol, sortDesc: sortDesc)
+}
+
+public func execute_query(
+    config: ConnectionConfig,
+    sql: String,
+    queryId: String,
+    maxRows: UInt32? = nil
+) async throws -> QueryResult {
+    try await executeQuery(config: config, sql: sql, queryId: queryId, maxRows: maxRows)
+}
+
+public func cancel_query(queryId: String) async throws -> Bool {
+    try await cancelQuery(queryId: queryId)
 }

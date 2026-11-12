@@ -3,29 +3,41 @@ import LucidSQLBridge
 
 @MainActor
 public final class WorkspaceModel: ObservableObject {
+    public enum WorkspaceMode: String, CaseIterable, Identifiable {
+        case sqlEditor = "SQL Editor"
+        case tableData = "Table Data"
+        public var id: String { rawValue }
+    }
+
     @Published public var activeProfile: ConnectionProfile? = nil
     @Published public var activeConfig: ConnectionConfig? = nil
     @Published public var isShowingConnectionSheet: Bool = false
     @Published public var selectedTable: String = ""
+    @Published public var currentMode: WorkspaceMode = .sqlEditor
     public var tableViewModel = TableDataViewModel()
+    public var sqlEditorViewModel = SqlEditorViewModel()
 
     public init() {}
 
     public func connect(profile: ConnectionProfile, password: String?) {
         self.activeProfile = profile
         self.activeConfig = profile.toRustConfig(password: password)
+        self.currentMode = .sqlEditor
     }
 
     public func loadTable(schema: String, table: String) async {
         guard let config = activeConfig else { return }
         self.selectedTable = "\(schema).\(table)"
+        self.currentMode = .tableData
         await tableViewModel.loadTable(config: config, schema: schema, table: table)
     }
 
     public func disconnect() {
+        self.sqlEditorViewModel.reset()
         self.activeProfile = nil
         self.activeConfig = nil
         self.selectedTable = ""
+        self.currentMode = .sqlEditor
         self.tableViewModel = TableDataViewModel()
     }
 }
@@ -41,7 +53,9 @@ public struct WorkspaceView: View {
             // Grounded Sidebar Column
             Group {
                 if let config = model.activeConfig {
-                    SchemaTreeView(config: config) { schema, table in
+                    SchemaTreeView(config: config, onOpenSqlEditor: {
+                        model.currentMode = .sqlEditor
+                    }) { schema, table in
                         Task {
                             await model.loadTable(schema: schema, table: table)
                         }
@@ -71,8 +85,33 @@ public struct WorkspaceView: View {
         } detail: {
             // Translucent Main Workspace Pane
             Group {
-                if let config = model.activeConfig, !model.selectedTable.isEmpty {
-                    TableDataContainerView(viewModel: model.tableViewModel, config: config)
+                if let config = model.activeConfig {
+                    switch model.currentMode {
+                    case .sqlEditor:
+                        SqlEditorContainerView(viewModel: model.sqlEditorViewModel, config: config)
+                    case .tableData:
+                        if !model.selectedTable.isEmpty {
+                            TableDataContainerView(viewModel: model.tableViewModel, config: config)
+                        } else {
+                            VStack(spacing: 16) {
+                                Spacer()
+                                Image(systemName: "tablecells")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(Color.accentColor)
+                                Text("Select a table or view from the sidebar to inspect records")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.secondary)
+                                SecondaryActionButton(
+                                    title: "Open SQL Editor",
+                                    icon: "terminal",
+                                    size: .regular
+                                ) {
+                                    model.currentMode = .sqlEditor
+                                }
+                                Spacer()
+                            }
+                        }
+                    }
                 } else {
                     // Clean Translucent Welcome Pane
                     VStack(spacing: 28) {
@@ -121,6 +160,18 @@ public struct WorkspaceView: View {
             }
         }
         .toolbar {
+            if model.activeConfig != nil {
+                ToolbarItem(placement: .automatic) {
+                    Picker("View", selection: $model.currentMode) {
+                        Label("SQL Editor", systemImage: "terminal").tag(WorkspaceModel.WorkspaceMode.sqlEditor)
+                        Label("Table Data", systemImage: "tablecells").tag(WorkspaceModel.WorkspaceMode.tableData)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 190)
+                    .help("Switch view (⌘T for SQL Editor)")
+                }
+            }
+
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 6) {
                     Circle()

@@ -1,6 +1,8 @@
+pub mod execute;
 pub mod paged_table;
 pub mod value_mapper;
 
+pub use execute::{cancel_active_query, execute_sql, QueryResult};
 pub use paged_table::fetch_page;
 pub use value_mapper::map_cell_value;
 

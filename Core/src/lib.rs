@@ -10,7 +10,7 @@ pub mod schema;
 
 pub use connection::ConnectionConfig;
 pub use error::LucidError;
-pub use query::{CellValue, RecordPage, RowData};
+pub use query::{CellValue, QueryResult, RecordPage, RowData};
 pub use schema::{ColumnMetadata, TableInfo};
 
 static TOKIO_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
@@ -162,6 +162,41 @@ pub async fn fetch_table_page(
                 &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
             )
             .await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn execute_query(
+    config: ConnectionConfig,
+    sql: String,
+    query_id: String,
+    max_rows: Option<u32>,
+) -> Result<QueryResult, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            query::execute_sql(&client, &sql, &query_id, max_rows).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn cancel_query(query_id: String) -> Result<bool, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            query::cancel_active_query(&query_id).await
         })
         .await
         .map_err(|e| LucidError::DatabaseError {
