@@ -12,11 +12,20 @@ public final class WorkspaceModel: ObservableObject {
 
     @Published public var activeProfile: ConnectionProfile? = nil
     @Published public var activeConfig: ConnectionConfig? = nil
+    @Published public var activeConnectionSessionToken: UUID = UUID()
+    @Published public var savedProfiles: [ConnectionProfile] = []
+    @Published public var selectedProfileId: UUID? = nil
+    @Published public var initialDialogProfile: ConnectionProfile? = nil
+    @Published public var initialDialogNotice: String? = nil
     @Published public var isShowingConnectionSheet: Bool = false
     @Published public var selectedTable: String = ""
     @Published public var currentMode: WorkspaceMode = .sqlEditor
     @Published public var showingDisconnectSessionWarning: Bool = false
     @Published public var disconnectWarningMessage: String = ""
+    @Published public var showingSwitchConnectionAlert: Bool = false
+    @Published public var switchConnectionWarningMessage: String = ""
+    @Published public var showingWelcomeDeleteAlert: Bool = false
+    @Published public var profilePendingDelete: ConnectionProfile? = nil
     @Published public var showingTableNavigationAlert: Bool = false
     @Published public var tableNavigationWarningMessage: String = ""
     @Published public var isShowingSettingsSheet: Bool = false
@@ -24,11 +33,14 @@ public final class WorkspaceModel: ObservableObject {
     public var tableViewModel = TableDataViewModel()
     public let sqlWorkspace: SqlWorkspaceViewModel
     public let profileStore: ConnectionProfileStore
+    public let draftStore: SqlDraftStore
+    public let passwordStore: any PasswordStoring
     public let privacyPreferences: PrivacyPreferencesStore
     public var sweepGlobalSessionsOnDisconnect: Bool = true
 
     private var terminateObserver: NSObjectProtocol? = nil
     private var pendingTableNavigationAction: (() -> Void)? = nil
+    private var pendingConnectionSwitch: (profile: ConnectionProfile, password: String?)? = nil
 
     public var sqlEditorViewModel: SqlEditorViewModel {
         sqlWorkspace.activeTab ?? SqlEditorViewModel()
@@ -37,10 +49,13 @@ public final class WorkspaceModel: ObservableObject {
     public init(
         profileStore: ConnectionProfileStore = ConnectionProfileStore(),
         draftStore: SqlDraftStore = SqlDraftStore(),
+        passwordStore: any PasswordStoring = KeychainPasswordStore.shared,
         privacyPreferences: PrivacyPreferencesStore? = nil
     ) {
         let resolvedPrivacy = privacyPreferences ?? PrivacyPreferencesStore.shared
         self.profileStore = profileStore
+        self.draftStore = draftStore
+        self.passwordStore = passwordStore
         self.privacyPreferences = resolvedPrivacy
         self.sqlWorkspace = SqlWorkspaceViewModel(
             draftStore: draftStore,
@@ -48,6 +63,7 @@ public final class WorkspaceModel: ObservableObject {
         )
         bindReadOnlySync()
         registerTerminateObserver()
+        refreshSavedProfiles()
     }
 
     deinit {
@@ -89,10 +105,137 @@ public final class WorkspaceModel: ObservableObject {
         }
     }
 
+    public var selectedSavedProfile: ConnectionProfile? {
+        if let selectedProfileId,
+           let match = savedProfiles.first(where: { $0.id == selectedProfileId }) {
+            return match
+        }
+        return savedProfiles.first
+    }
+
+    public func refreshSavedProfiles() {
+        let profiles = profileStore.loadProfiles()
+        self.savedProfiles = profiles
+        if let currentId = selectedProfileId, profiles.contains(where: { $0.id == currentId }) {
+            return
+        }
+        self.selectedProfileId = profileStore.lastSelectedProfileId() ?? profiles.first?.id
+    }
+
+    public func selectSavedProfile(_ id: UUID) {
+        selectedProfileId = id
+        try? profileStore.selectProfile(id: id)
+    }
+
+    public func openConnectionDialog(
+        selecting profile: ConnectionProfile? = nil,
+        startNew: Bool = false,
+        notice: String? = nil
+    ) {
+        if startNew {
+            initialDialogProfile = ConnectionProfile(name: "New PostgreSQL")
+        } else if let profile {
+            selectSavedProfile(profile.id)
+            initialDialogProfile = profile
+        } else {
+            initialDialogProfile = activeProfile ?? selectedSavedProfile ?? profileStore.mostRecentProfile() ?? ConnectionProfile()
+        }
+        initialDialogNotice = notice
+        isShowingConnectionSheet = true
+    }
+
+    public func quickConnect(profile: ConnectionProfile) {
+        selectSavedProfile(profile.id)
+        if !profile.rememberPassword {
+            openConnectionDialog(
+                selecting: profile,
+                notice: "Password is not remembered for \"\(profile.name)\". Enter your password to connect (or click Connect if none is required)."
+            )
+            return
+        }
+        let storedPassword = (try? passwordStore.getPassword(profileId: profile.id)) ?? nil
+        let resolvedPassword = (storedPassword?.isEmpty == false) ? storedPassword : nil
+        requestConnection(profile, password: resolvedPassword)
+    }
+
+    public func duplicateSavedProfile(_ id: UUID) {
+        if let copy = try? profileStore.duplicateProfile(id: id, passwordStore: passwordStore) {
+            refreshSavedProfiles()
+            selectedProfileId = copy.id
+        }
+    }
+
+    public func requestDeleteSavedProfile(_ profile: ConnectionProfile) {
+        guard activeProfile?.id != profile.id else { return }
+        profilePendingDelete = profile
+        showingWelcomeDeleteAlert = true
+    }
+
+    public func confirmDeleteSavedProfile() {
+        guard let profile = profilePendingDelete else { return }
+        profilePendingDelete = nil
+        showingWelcomeDeleteAlert = false
+        try? profileStore.deleteProfile(id: profile.id, draftStore: draftStore, passwordStore: passwordStore)
+        selectedProfileId = nil
+        refreshSavedProfiles()
+    }
+
+    public func cancelDeleteSavedProfile() {
+        profilePendingDelete = nil
+        showingWelcomeDeleteAlert = false
+    }
+
+    public func requestConnection(_ profile: ConnectionProfile, password: String?) {
+        guard activeConfig != nil else {
+            connect(profile: profile, password: password)
+            return
+        }
+
+        if !lifecycleSummary.isEmpty {
+            pendingConnectionSwitch = (profile, password)
+            switchConnectionWarningMessage = formattedLifecycleWarning(actionVerb: "switch connections")
+            showingSwitchConnectionAlert = true
+        } else {
+            Task { @MainActor in
+                await self.performConfirmedConnectionSwitch(to: profile, password: password)
+            }
+        }
+    }
+
+    public func confirmConnectionSwitch() {
+        let pending = pendingConnectionSwitch
+        pendingConnectionSwitch = nil
+        showingSwitchConnectionAlert = false
+        switchConnectionWarningMessage = ""
+        guard let target = pending else { return }
+        Task { @MainActor in
+            await self.performConfirmedConnectionSwitch(to: target.profile, password: target.password)
+        }
+    }
+
+    public func cancelConnectionSwitch() {
+        pendingConnectionSwitch = nil
+        showingSwitchConnectionAlert = false
+        switchConnectionWarningMessage = ""
+    }
+
+    public func performConfirmedConnectionSwitch(to profile: ConnectionProfile, password: String?) async {
+        let currentReadOnly = sqlWorkspace.defaultReadOnly
+        tableViewModel.discardChanges()
+        await performBoundedTeardown(timeoutSeconds: 2.5)
+        self.selectedTable = ""
+        self.tableViewModel = TableDataViewModel()
+        self.tableViewModel.isReadOnly = currentReadOnly
+        connect(profile: profile, password: password)
+    }
+
     public func connect(profile: ConnectionProfile, password: String?) {
-        try? profileStore.saveOrUpdateProfile(profile)
+        try? profileStore.saveOrUpdateProfile(profile, markAsConnected: true, markSelected: true)
+        refreshSavedProfiles()
+        self.selectedProfileId = profile.id
         self.activeProfile = profile
         self.activeConfig = profile.toRustConfig(password: password)
+        self.activeConnectionSessionToken = UUID()
         self.currentMode = .sqlEditor
         self.sqlWorkspace.activate(profileId: profile.id, readOnlyDefault: self.tableViewModel.isReadOnly)
         self.tableViewModel.isReadOnly = self.sqlWorkspace.activeTab?.isReadOnly ?? self.sqlWorkspace.defaultReadOnly
@@ -306,6 +449,7 @@ public struct WorkspaceView: View {
                             await model.loadTable(schema: schema, table: table)
                         }
                     }
+                    .id(model.activeConnectionSessionToken)
                 } else {
                     // Quiet Disconnected Sidebar
                     VStack(alignment: .leading, spacing: 10) {
@@ -335,6 +479,7 @@ public struct WorkspaceView: View {
                     switch model.currentMode {
                     case .sqlEditor:
                         SqlEditorContainerView(workspace: model.sqlWorkspace, config: config)
+                            .id(model.activeConnectionSessionToken)
                     case .tableData:
                         if !model.selectedTable.isEmpty {
                             TableDataContainerView(
@@ -385,19 +530,153 @@ public struct WorkspaceView: View {
                         }
 
                         if model.activeConfig == nil {
-                            VStack(spacing: 14) {
-                                PrimaryActionButton(
-                                    title: "New Connection",
-                                    icon: "plus",
-                                    size: .extraLarge
-                                ) {
-                                    model.isShowingConnectionSheet = true
-                                }
-                                .keyboardShortcut("n", modifiers: [.command])
+                            if model.savedProfiles.isEmpty {
+                                VStack(spacing: 14) {
+                                    PrimaryActionButton(
+                                        title: "New Connection",
+                                        icon: "plus",
+                                        size: .extraLarge
+                                    ) {
+                                        model.openConnectionDialog(startNew: true)
+                                    }
+                                    .keyboardShortcut("n", modifiers: [.command])
 
-                                KeyboardBadge(keys: ["⌘", "N"], label: "New Connection")
+                                    KeyboardBadge(keys: ["⌘", "N"], label: "New Connection")
+                                }
+                                .padding(.top, 4)
+                            } else {
+                                VStack(spacing: 14) {
+                                    VStack(spacing: 0) {
+                                        HStack {
+                                            Text("SAVED CONNECTIONS")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(.secondary)
+                                            Spacer()
+                                            Button {
+                                                model.openConnectionDialog(selecting: model.selectedSavedProfile)
+                                            } label: {
+                                                Text("Manage...")
+                                                    .font(.system(size: 11))
+                                            }
+                                            .buttonStyle(.borderless)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+
+                                        Divider()
+
+                                        ScrollView {
+                                            VStack(spacing: 2) {
+                                                ForEach(model.savedProfiles) { profile in
+                                                    let isSelected = model.selectedProfileId == profile.id
+                                                    HStack(spacing: 10) {
+                                                        Image(systemName: isSelected ? "checkmark.circle.fill" : "cylinder.split.1x2")
+                                                            .font(.system(size: 13))
+                                                            .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+
+                                                        VStack(alignment: .leading, spacing: 2) {
+                                                            HStack(spacing: 6) {
+                                                                Text(profile.name)
+                                                                    .font(.system(size: 13, weight: .medium))
+                                                                    .lineLimit(1)
+                                                                Text(profile.sslMode)
+                                                                    .font(.system(size: 10, weight: .medium))
+                                                                    .foregroundStyle(.secondary)
+                                                                    .padding(.horizontal, 5)
+                                                                    .padding(.vertical, 1)
+                                                                    .background(Color(NSColor.quaternaryLabelColor).opacity(0.25), in: Capsule())
+                                                                if !profile.rememberPassword {
+                                                                    Image(systemName: "key.slash")
+                                                                        .font(.system(size: 10))
+                                                                        .foregroundStyle(.secondary)
+                                                                        .help("Password not stored in Keychain")
+                                                                }
+                                                            }
+                                                            Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
+                                                                .font(.system(size: 11, design: .monospaced))
+                                                                .foregroundStyle(.secondary)
+                                                                .lineLimit(1)
+                                                        }
+
+                                                        Spacer(minLength: 8)
+
+                                                        Button("Edit") {
+                                                            model.openConnectionDialog(selecting: profile)
+                                                        }
+                                                        .controlSize(.small)
+
+                                                        Button("Connect") {
+                                                            model.quickConnect(profile: profile)
+                                                        }
+                                                        .buttonStyle(.borderedProminent)
+                                                        .controlSize(.small)
+                                                    }
+                                                    .padding(.horizontal, 12)
+                                                    .padding(.vertical, 8)
+                                                    .background(
+                                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                            .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+                                                    )
+                                                    .contentShape(Rectangle())
+                                                    .onTapGesture {
+                                                        model.selectSavedProfile(profile.id)
+                                                    }
+                                                    .onTapGesture(count: 2) {
+                                                        model.quickConnect(profile: profile)
+                                                    }
+                                                    .contextMenu {
+                                                        Button("Quick Connect") {
+                                                            model.quickConnect(profile: profile)
+                                                        }
+                                                        Button("Edit Connection...") {
+                                                            model.openConnectionDialog(selecting: profile)
+                                                        }
+                                                        Button("Duplicate") {
+                                                            model.duplicateSavedProfile(profile.id)
+                                                        }
+                                                        Divider()
+                                                        Button("Delete...", role: .destructive) {
+                                                            model.requestDeleteSavedProfile(profile)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            .padding(8)
+                                        }
+                                        .frame(maxHeight: 220)
+                                    }
+                                    .frame(width: 520)
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .strokeBorder(Color(NSColor.separatorColor).opacity(0.4), lineWidth: 0.5)
+                                    )
+
+                                    HStack(spacing: 12) {
+                                        if let selected = model.selectedSavedProfile {
+                                            PrimaryActionButton(
+                                                title: "Connect Selected",
+                                                icon: "bolt.fill",
+                                                size: .large
+                                            ) {
+                                                model.quickConnect(profile: selected)
+                                            }
+                                        }
+
+                                        SecondaryActionButton(
+                                            title: "New Connection",
+                                            icon: "plus",
+                                            size: .large
+                                        ) {
+                                            model.openConnectionDialog(startNew: true)
+                                        }
+                                        .keyboardShortcut("n", modifiers: [.command])
+                                    }
+
+                                    KeyboardBadge(keys: ["⌘", "N"], label: "New Connection")
+                                }
+                                .padding(.top, 4)
                             }
-                            .padding(.top, 4)
                         }
 
                         Spacer()
@@ -453,30 +732,43 @@ public struct WorkspaceView: View {
             }
 
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(model.activeConfig != nil ? Color.green : Color.secondary.opacity(0.4))
-                        .frame(width: 7, height: 7)
+                Button {
+                    model.openConnectionDialog()
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(model.activeConfig != nil ? Color.green : Color.secondary.opacity(0.4))
+                            .frame(width: 7, height: 7)
 
-                    if let profile = model.activeProfile {
-                        Text(profile.name)
-                            .font(.system(size: 11, weight: .medium))
-                        Text("(\(profile.host):\(profile.port))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Not Connected")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                        if let profile = model.activeProfile {
+                            Text(profile.name)
+                                .font(.system(size: 11, weight: .medium))
+                            Text("(\(profile.host):\(profile.port))")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        } else if let selected = model.selectedSavedProfile {
+                            Text("Selected: \(selected.name)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Not Connected")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color(NSColor.separatorColor).opacity(0.35), lineWidth: 0.5)
+                    )
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color(NSColor.separatorColor).opacity(0.35), lineWidth: 0.5)
-                )
+                .buttonStyle(.plain)
+                .help("Saved Connections & Quick Switch (⌘⇧O)")
             }
 
             ToolbarItem(placement: .primaryAction) {
@@ -503,19 +795,26 @@ public struct WorkspaceView: View {
                             icon: "cable.connector",
                             size: .regular
                         ) {
-                            model.isShowingConnectionSheet = true
+                            model.openConnectionDialog()
                         }
-                        .help("Connect to PostgreSQL (⌘N)")
+                        .help("Open Connections (⌘N)")
                     }
                 }
             }
         }
         .sheet(isPresented: $model.isShowingConnectionSheet) {
             ConnectionDialogView(
-                profile: model.activeProfile ?? model.profileStore.mostRecentProfile() ?? ConnectionProfile(),
-                profileStore: model.profileStore
+                profile: model.initialDialogProfile ?? model.activeProfile ?? model.selectedSavedProfile ?? model.profileStore.mostRecentProfile() ?? ConnectionProfile(),
+                initialNotice: model.initialDialogNotice,
+                activeConnectedProfileId: model.activeProfile?.id,
+                profileStore: model.profileStore,
+                draftStore: model.draftStore,
+                passwordStore: model.passwordStore,
+                onProfilesChanged: {
+                    model.refreshSavedProfiles()
+                }
             ) { profile, password in
-                model.connect(profile: profile, password: password)
+                model.requestConnection(profile, password: password)
             }
         }
         .sheet(isPresented: $model.isShowingSettingsSheet) {
@@ -545,6 +844,28 @@ public struct WorkspaceView: View {
             }
         } message: {
             Text(model.disconnectWarningMessage)
+        }
+        .alert("Switch Connection?", isPresented: $model.showingSwitchConnectionAlert) {
+            Button("Switch & Clean Up", role: .destructive) {
+                model.confirmConnectionSwitch()
+            }
+            Button("Stay Connected", role: .cancel) {
+                model.cancelConnectionSwitch()
+            }
+        } message: {
+            Text(model.switchConnectionWarningMessage)
+        }
+        .alert("Delete Saved Connection?", isPresented: $model.showingWelcomeDeleteAlert) {
+            Button("Delete Profile", role: .destructive) {
+                model.confirmDeleteSavedProfile()
+            }
+            Button("Cancel", role: .cancel) {
+                model.cancelDeleteSavedProfile()
+            }
+        } message: {
+            if let profile = model.profilePendingDelete {
+                Text("Delete \"\(profile.name)\" (\(profile.host):\(profile.port))? This removes the profile, its Keychain password, and any saved SQL drafts for it.")
+            }
         }
     }
 }

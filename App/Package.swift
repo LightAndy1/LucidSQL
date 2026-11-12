@@ -3,7 +3,18 @@ import PackageDescription
 import Foundation
 
 let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? "/Library/Developer/CommandLineTools"
-let testingMacroPath = "\(developerDir)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+let testingMacroCandidates = [
+    "\(developerDir)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib",
+    "\(developerDir)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+]
+let resolvedTestingMacroPath = testingMacroCandidates.first { FileManager.default.fileExists(atPath: $0) }
+let testSwiftSettings: [SwiftSetting] = {
+    var settings: [SwiftSetting] = [.swiftLanguageMode(.v6)]
+    if let resolvedTestingMacroPath {
+        settings.append(.unsafeFlags(["-load-plugin-library", resolvedTestingMacroPath]))
+    }
+    return settings
+}()
 
 let package = Package(
     name: "LucidSQL",
@@ -58,13 +69,7 @@ let package = Package(
             name: "LucidSQLTests",
             dependencies: ["LucidSQL"],
             path: "Tests/LucidSQLTests",
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-                .unsafeFlags([
-                    "-load-plugin-library",
-                    testingMacroPath
-                ])
-            ]
+            swiftSettings: testSwiftSettings
         )
     ]
 )

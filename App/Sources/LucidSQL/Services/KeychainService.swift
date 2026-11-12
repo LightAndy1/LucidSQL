@@ -1,6 +1,30 @@
 import Foundation
 import Security
 
+public protocol PasswordStoring: Sendable {
+    func savePassword(profileId: UUID, password: String) throws
+    func getPassword(profileId: UUID) throws -> String?
+    func deletePassword(profileId: UUID) throws
+}
+
+public struct KeychainPasswordStore: PasswordStoring, Sendable {
+    public static let shared = KeychainPasswordStore()
+
+    public init() {}
+
+    public func savePassword(profileId: UUID, password: String) throws {
+        try KeychainService.savePassword(profileId: profileId, password: password)
+    }
+
+    public func getPassword(profileId: UUID) throws -> String? {
+        try KeychainService.getPassword(profileId: profileId)
+    }
+
+    public func deletePassword(profileId: UUID) throws {
+        try KeychainService.deletePassword(profileId: profileId)
+    }
+}
+
 public enum KeychainService {
     private static let serviceName = "com.lucidsql.connection-passwords"
 

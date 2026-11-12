@@ -58,6 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
+        let connectionsItem = NSMenuItem(title: "Connections...", action: #selector(openConnectionsSheet), keyEquivalent: "O")
+        connectionsItem.target = self
+        fileMenu.addItem(connectionsItem)
+        fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
         // Edit Menu (enables standard copy/paste/select-all in NSTextView and TextFields)
@@ -78,6 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func openSettingsSheet() {
         workspaceModel.isShowingSettingsSheet = true
+    }
+
+    @objc private func openConnectionsSheet() {
+        workspaceModel.openConnectionDialog()
     }
 
     private func confirmLifecycleExit(title: String, actionVerb: String, primaryButtonTitle: String) -> Bool {
