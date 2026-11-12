@@ -1,0 +1,220 @@
+use std::sync::LazyLock;
+use tokio::runtime::Runtime;
+
+uniffi::setup_scaffolding!();
+
+pub mod connection;
+pub mod error;
+pub mod query;
+pub mod schema;
+
+pub use connection::ConnectionConfig;
+pub use error::LucidError;
+pub use query::{CellValue, RecordPage, RowData};
+pub use schema::{ColumnMetadata, TableInfo};
+
+static TOKIO_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to initialize Tokio runtime")
+});
+
+pub fn get_runtime() -> &'static Runtime {
+    &TOKIO_RUNTIME
+}
+
+#[uniffi::export]
+pub fn bridge_ping() -> String {
+    "pong from rust".to_string()
+}
+
+#[uniffi::export]
+pub async fn async_test_operation(delay_ms: u64) -> Result<String, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            Ok::<String, LucidError>(format!("completed after {}ms", delay_ms))
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub fn trigger_test_error(error_type: String) -> Result<(), LucidError> {
+    match error_type.as_str() {
+        "auth" => Err(LucidError::AuthenticationFailed {
+            message: "invalid credentials".into(),
+        }),
+        "timeout" => Err(LucidError::QueryTimedOut { duration_ms: 5000 }),
+        "readonly" => Err(LucidError::ReadOnlyViolation {
+            attempted_operation: "DROP TABLE".into(),
+        }),
+        _ => Err(LucidError::DatabaseError {
+            code: "42601".into(),
+            message: "syntax error".into(),
+            detail: None,
+        }),
+    }
+}
+
+#[uniffi::export]
+pub async fn test_database_connection(config: ConnectionConfig) -> Result<String, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            let row = client
+                .query_one("SELECT version();", &[])
+                .await
+                .map_err(|e| LucidError::DatabaseError {
+                    code: "08000".into(),
+                    message: e.to_string(),
+                    detail: None,
+                })?;
+            let version: String = row.get(0);
+            Ok(version)
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn introspect_schemas(config: ConnectionConfig) -> Result<Vec<String>, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            schema::query_schemas(&client).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn introspect_tables(
+    config: ConnectionConfig,
+    schema: String,
+) -> Result<Vec<TableInfo>, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            schema::query_tables(&client, &schema).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn introspect_columns(
+    config: ConnectionConfig,
+    schema: String,
+    table: String,
+) -> Result<Vec<ColumnMetadata>, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            schema::query_columns(&client, &schema, &table).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn fetch_table_page(
+    config: ConnectionConfig,
+    schema: String,
+    table: String,
+    offset: u64,
+    limit: u32,
+    sort_col: Option<String>,
+    sort_desc: bool,
+) -> Result<RecordPage, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let client = pool.get().await?;
+            let cols = schema::query_columns(&client, &schema, &table).await?;
+            let has_pk = cols.iter().any(|c| c.is_primary_key);
+            query::fetch_page(
+                &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
+            )
+            .await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bridge_ping() {
+        assert_eq!(bridge_ping(), "pong from rust");
+    }
+
+    #[tokio::test]
+    async fn test_async_operation() {
+        let res = async_test_operation(10).await;
+        assert_eq!(res.unwrap(), "completed after 10ms");
+    }
+
+    #[test]
+    fn test_trigger_errors() {
+        let auth_err = trigger_test_error("auth".into()).unwrap_err();
+        assert_eq!(
+            auth_err,
+            LucidError::AuthenticationFailed {
+                message: "invalid credentials".into(),
+            }
+        );
+
+        let timeout_err = trigger_test_error("timeout".into()).unwrap_err();
+        assert_eq!(timeout_err, LucidError::QueryTimedOut { duration_ms: 5000 });
+
+        let ro_err = trigger_test_error("readonly".into()).unwrap_err();
+        assert_eq!(
+            ro_err,
+            LucidError::ReadOnlyViolation {
+                attempted_operation: "DROP TABLE".into(),
+            }
+        );
+
+        let other_err = trigger_test_error("unknown".into()).unwrap_err();
+        assert_eq!(
+            other_err,
+            LucidError::DatabaseError {
+                code: "42601".into(),
+                message: "syntax error".into(),
+                detail: None,
+            }
+        );
+    }
+}
