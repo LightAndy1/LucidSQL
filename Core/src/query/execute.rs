@@ -193,6 +193,7 @@ pub async fn execute_sql(
                 is_primary_key: false,
                 is_nullable: true,
                 default_value: None,
+                is_generated: false,
             });
         }
 

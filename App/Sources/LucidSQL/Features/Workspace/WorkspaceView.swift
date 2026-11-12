@@ -23,22 +23,31 @@ public final class WorkspaceModel: ObservableObject {
         self.activeProfile = profile
         self.activeConfig = profile.toRustConfig(password: password)
         self.currentMode = .sqlEditor
+        self.tableViewModel.isReadOnly = self.sqlEditorViewModel.isReadOnly
     }
 
     public func loadTable(schema: String, table: String) async {
         guard let config = activeConfig else { return }
-        self.selectedTable = "\(schema).\(table)"
-        self.currentMode = .tableData
-        await tableViewModel.loadTable(config: config, schema: schema, table: table)
+        tableViewModel.safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.selectedTable = "\(schema).\(table)"
+            self.currentMode = .tableData
+            Task {
+                await self.tableViewModel.loadTable(config: config, schema: schema, table: table)
+            }
+        }
     }
 
     public func disconnect() {
-        self.sqlEditorViewModel.reset()
-        self.activeProfile = nil
-        self.activeConfig = nil
-        self.selectedTable = ""
-        self.currentMode = .sqlEditor
-        self.tableViewModel = TableDataViewModel()
+        tableViewModel.safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.sqlEditorViewModel.reset()
+            self.activeProfile = nil
+            self.activeConfig = nil
+            self.selectedTable = ""
+            self.currentMode = .sqlEditor
+            self.tableViewModel = TableDataViewModel()
+        }
     }
 }
 

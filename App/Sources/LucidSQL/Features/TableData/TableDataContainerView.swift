@@ -2,7 +2,7 @@ import SwiftUI
 import LucidSQLBridge
 
 public struct TableDataContainerView: View {
-    public let viewModel: TableDataViewModel
+    @Bindable public var viewModel: TableDataViewModel
     public let config: ConnectionConfig
 
     public init(viewModel: TableDataViewModel, config: ConnectionConfig) {
@@ -30,7 +30,7 @@ public struct TableDataContainerView: View {
                         .padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.12), in: Capsule())
 
-                    if viewModel.columns.contains(where: { $0.isPrimaryKey }) {
+                    if viewModel.hasPrimaryKey {
                         HStack(spacing: 3) {
                             Image(systemName: "key.fill")
                                 .font(.system(size: 8))
@@ -41,10 +41,59 @@ public struct TableDataContainerView: View {
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(Color.orange.opacity(0.12), in: Capsule())
+                    } else if !viewModel.columns.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8))
+                            Text("No PK (Read-Only)")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.1), in: Capsule())
+                        .help("This table does not have a primary key. In-grid editing requires a primary key for safe row identity.")
+                    }
+
+                    if viewModel.isReadOnly {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.shield.fill")
+                                .font(.system(size: 8))
+                            Text("Read-Only")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
                     }
                 }
 
                 Spacer()
+
+                // Staged Changes Actions
+                if !viewModel.stagedEdits.isEmpty {
+                    HStack(spacing: 6) {
+                        SecondaryActionButton(
+                            title: "Discard (\(viewModel.stagedEdits.count))",
+                            icon: "arrow.uturn.backward",
+                            size: .small
+                        ) {
+                            viewModel.discardChanges()
+                        }
+                        .help("Discard all staged edits for this table")
+
+                        PrimaryActionButton(
+                            title: "Apply (\(viewModel.stagedEdits.count))",
+                            icon: "checkmark",
+                            size: .small
+                        ) {
+                            viewModel.showingReviewSheet = true
+                        }
+                        .help("Review and atomically apply staged edits")
+                    }
+                    .padding(.trailing, 4)
+                }
 
                 if viewModel.isLoading {
                     ProgressView()
@@ -55,7 +104,7 @@ public struct TableDataContainerView: View {
                 // Compact Pagination Controls
                 HStack(spacing: 5) {
                     Button {
-                        Task { await viewModel.previousPage(config: config) }
+                        viewModel.previousPage(config: config)
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 10, weight: .semibold))
@@ -72,7 +121,7 @@ public struct TableDataContainerView: View {
                         .padding(.horizontal, 4)
 
                     Button {
-                        Task { await viewModel.nextPage(config: config) }
+                        viewModel.nextPage(config: config)
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
@@ -87,7 +136,7 @@ public struct TableDataContainerView: View {
                         .padding(.horizontal, 2)
 
                     Button {
-                        Task { await viewModel.fetchPage(config: config) }
+                        viewModel.reloadTable(config: config)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 10, weight: .semibold))
@@ -104,6 +153,31 @@ public struct TableDataContainerView: View {
 
             Divider()
 
+            // Success Status Banner if present
+            if let status = viewModel.statusMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 12))
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button {
+                        viewModel.statusMessage = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.green.opacity(0.08))
+                Divider()
+            }
+
             // Error Banner if present
             if let error = viewModel.errorMessage {
                 HStack(spacing: 8) {
@@ -113,7 +187,16 @@ public struct TableDataContainerView: View {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)
+                        .textSelection(.enabled)
                     Spacer()
+                    Button {
+                        viewModel.errorMessage = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -156,6 +239,14 @@ public struct TableDataContainerView: View {
 
                 Spacer()
 
+                if viewModel.isEditable {
+                    Text("Double-click or Enter to edit • ⎋ to cancel • ⌥⌘N for NULL")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer()
+
                 if !viewModel.stagedEdits.isEmpty {
                     HStack(spacing: 4) {
                         Circle()
@@ -170,6 +261,19 @@ public struct TableDataContainerView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
             .background(.ultraThinMaterial)
+        }
+        .sheet(isPresented: $viewModel.showingReviewSheet) {
+            StagedChangesReviewSheet(viewModel: viewModel, config: config)
+        }
+        .alert("Unsaved Changes", isPresented: $viewModel.showingUnsavedChangesAlert) {
+            Button("Discard Changes", role: .destructive) {
+                viewModel.confirmDiscardAndNavigate()
+            }
+            Button("Cancel", role: .cancel) {
+                viewModel.cancelNavigation()
+            }
+        } message: {
+            Text("You have \(viewModel.stagedEdits.count) unsaved edit\(viewModel.stagedEdits.count == 1 ? "" : "s") in \(viewModel.currentTable). Discard changes to proceed, or cancel to stay on this view?")
         }
     }
 

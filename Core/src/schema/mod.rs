@@ -18,4 +18,5 @@ pub struct ColumnMetadata {
     pub is_primary_key: bool,
     pub is_nullable: bool,
     pub default_value: Option<String>,
+    pub is_generated: bool,
 }

@@ -5,11 +5,13 @@ uniffi::setup_scaffolding!();
 
 pub mod connection;
 pub mod error;
+pub mod mutation;
 pub mod query;
 pub mod schema;
 
 pub use connection::{ConnectionConfig, SessionInfo, TransactionStatus};
 pub use error::LucidError;
+pub use mutation::{BatchMutationRequest, BatchMutationResult, RowMutation};
 pub use query::{CellValue, QueryResult, RecordPage, RowData};
 pub use schema::{ColumnMetadata, TableInfo};
 
@@ -162,6 +164,32 @@ pub async fn fetch_table_page(
                 &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
             )
             .await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn apply_table_mutations(
+    config: ConnectionConfig,
+    request: BatchMutationRequest,
+    read_only: bool,
+) -> Result<BatchMutationResult, LucidError> {
+    if read_only {
+        return Err(LucidError::ReadOnlyViolation {
+            attempted_operation: "Table row mutations are not allowed in read-only mode.".into(),
+        });
+    }
+
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::new(&config)?;
+            let mut client = pool.get().await?;
+            mutation::execute_batch_mutation(&mut client, request).await
         })
         .await
         .map_err(|e| LucidError::DatabaseError {

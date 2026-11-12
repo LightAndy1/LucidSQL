@@ -1,8 +1,8 @@
 use crate::error::LucidError;
 use super::{ColumnMetadata, TableInfo};
-use deadpool_postgres::Client;
+use deadpool_postgres::GenericClient;
 
-pub async fn query_schemas(client: &Client) -> Result<Vec<String>, LucidError> {
+pub async fn query_schemas<C: GenericClient>(client: &C) -> Result<Vec<String>, LucidError> {
     let sql = r#"
         SELECT nspname
         FROM pg_namespace
@@ -22,7 +22,7 @@ pub async fn query_schemas(client: &Client) -> Result<Vec<String>, LucidError> {
     Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
 }
 
-pub async fn query_tables(client: &Client, schema: &str) -> Result<Vec<TableInfo>, LucidError> {
+pub async fn query_tables<C: GenericClient>(client: &C, schema: &str) -> Result<Vec<TableInfo>, LucidError> {
     let sql = r#"
         SELECT 
             c.table_name,
@@ -55,8 +55,8 @@ pub async fn query_tables(client: &Client, schema: &str) -> Result<Vec<TableInfo
     Ok(tables)
 }
 
-pub async fn query_columns(
-    client: &Client,
+pub async fn query_columns<C: GenericClient>(
+    client: &C,
     schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnMetadata>, LucidError> {
@@ -68,7 +68,8 @@ pub async fn query_columns(
             t.oid as pg_type_oid,
             (pk.conkey IS NOT NULL AND a.attnum = ANY(pk.conkey)) as is_pk,
             NOT a.attnotnull as is_nullable,
-            pg_get_expr(d.adbin, d.adrelid) as default_value
+            pg_get_expr(d.adbin, d.adrelid) as default_value,
+            COALESCE(a.attgenerated, '') != '' as is_generated
         FROM pg_attribute a
         JOIN pg_class c ON c.oid = a.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -97,6 +98,7 @@ pub async fn query_columns(
             is_primary_key: row.get(4),
             is_nullable: row.get(5),
             default_value: row.get(6),
+            is_generated: row.get(7),
         });
     }
     Ok(columns)

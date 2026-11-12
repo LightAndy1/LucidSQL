@@ -10,6 +10,9 @@ extension CellValue: @unchecked Sendable {}
 extension QueryResult: @unchecked Sendable {}
 extension SessionInfo: @unchecked Sendable {}
 extension TransactionStatus: @unchecked Sendable {}
+extension RowMutation: @unchecked Sendable {}
+extension BatchMutationRequest: @unchecked Sendable {}
+extension BatchMutationResult: @unchecked Sendable {}
 
 // Provide snake_case aliases matching Rust/plan spec
 public func bridge_ping() -> String {
@@ -93,4 +96,12 @@ public func set_session_read_only(sessionId: String, readOnly: Bool) async throw
 
 public func get_session_info(sessionId: String) async throws -> SessionInfo {
     try await getSessionInfo(sessionId: sessionId)
+}
+
+public func apply_table_mutations(
+    config: ConnectionConfig,
+    request: BatchMutationRequest,
+    readOnly: Bool = false
+) async throws -> BatchMutationResult {
+    try await applyTableMutations(config: config, request: request, readOnly: readOnly)
 }
