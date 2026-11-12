@@ -144,4 +144,249 @@ struct SqlEditorWorkflowTests {
             #expect(Bool(false), "Query should have been cancelled before completing")
         }
     }
+
+    @Test("Verify dedicated session state persistence (SET timezone)")
+    func testSessionStatePersistence() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_session_state_\(UUID().uuidString)"
+
+        // Query 1: Set timezone
+        let res1 = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "SET timezone = 'America/New_York';",
+            queryId: UUID().uuidString
+        )
+        #expect(res1.transactionStatus == .idle)
+
+        // Query 2: Check timezone on the same session
+        let res2 = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "SHOW timezone;",
+            queryId: UUID().uuidString
+        )
+        #expect(res2.rows.count == 1)
+        #expect(res2.rows[0].cells[0] == .text("America/New_York"))
+
+        try await close_session(sessionId: sessionId)
+    }
+
+    @Test("Verify dedicated session temp table persistence across queries")
+    func testSessionTempTablePersistence() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_temp_table_\(UUID().uuidString)"
+
+        // Query 1: Create temp table and insert rows
+        let setupSql = "CREATE TEMP TABLE t_swift_items (id int, name text); INSERT INTO t_swift_items VALUES (1, 'Mango'), (2, 'Papaya');"
+        let res1 = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: setupSql,
+            queryId: UUID().uuidString
+        )
+        #expect(res1.affectedRows == 2)
+
+        // Query 2: Query the temporary table
+        let querySql = "SELECT id, name FROM t_swift_items ORDER BY id;"
+        let res2 = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: querySql,
+            queryId: UUID().uuidString
+        )
+        #expect(res2.rows.count == 2)
+        #expect(res2.rows[0].cells[1] == .text("Mango"))
+        #expect(res2.rows[1].cells[1] == .text("Papaya"))
+
+        try await close_session(sessionId: sessionId)
+    }
+
+    @Test("Verify transaction lifecycle: BEGIN -> InTransaction, ROLLBACK -> Idle")
+    func testTransactionCommitAndRollback() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_tx_\(UUID().uuidString)"
+
+        // 1. BEGIN
+        let beginRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "BEGIN;",
+            queryId: UUID().uuidString
+        )
+        #expect(beginRes.transactionStatus == .inTransaction)
+
+        // 2. ROLLBACK
+        let rollbackRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "ROLLBACK;",
+            queryId: UUID().uuidString
+        )
+        #expect(rollbackRes.transactionStatus == .idle)
+
+        try await close_session(sessionId: sessionId)
+    }
+
+    @Test("Verify aborted transaction handling and recovery via ROLLBACK")
+    func testAbortedTransactionAndRecovery() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_abort_\(UUID().uuidString)"
+
+        // 1. BEGIN
+        let beginRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "BEGIN;",
+            queryId: UUID().uuidString
+        )
+        #expect(beginRes.transactionStatus == .inTransaction)
+
+        // 2. Failing statement inside transaction
+        do {
+            _ = try await execute_session_query(
+                config: config,
+                sessionId: sessionId,
+                sql: "SELECT 1/0;",
+                queryId: UUID().uuidString
+            )
+            #expect(Bool(false), "Expected division by zero error")
+        } catch {
+            #expect(true)
+        }
+
+        // Verify session status is FailedTransaction
+        let info = try await get_session_info(sessionId: sessionId)
+        #expect(info.transactionStatus == .failedTransaction)
+
+        // 3. Normal statement fails with 25P02
+        do {
+            _ = try await execute_session_query(
+                config: config,
+                sessionId: sessionId,
+                sql: "SELECT 1;",
+                queryId: UUID().uuidString
+            )
+            #expect(Bool(false), "Expected 25P02 error")
+        } catch let LucidError.DatabaseError(code, _, _) {
+            #expect(code == "25P02")
+        } catch {
+            #expect(Bool(false), "Expected DatabaseError with 25P02, got: \(error)")
+        }
+
+        // 4. ROLLBACK restores Idle
+        let rollbackRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "ROLLBACK;",
+            queryId: UUID().uuidString
+        )
+        #expect(rollbackRes.transactionStatus == .idle)
+
+        // 5. Subsequent statement succeeds
+        let successRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "SELECT 100 as test_val;",
+            queryId: UUID().uuidString
+        )
+        #expect(successRes.rows.count == 1)
+
+        try await close_session(sessionId: sessionId)
+    }
+
+    @Test("Verify multi-statement script execution with strings containing semicolons and comments")
+    func testMultiStatementScript() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_multi_\(UUID().uuidString)"
+
+        let script = """
+        -- Setup table
+        CREATE TEMP TABLE t_swift_multi (id int, comment text);
+        /* Insert with semicolon in string */
+        INSERT INTO t_swift_multi VALUES (1, 'data; with semicolon; inside');
+        SELECT comment FROM t_swift_multi WHERE id = 1;
+        """
+
+        let result = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: script,
+            queryId: UUID().uuidString
+        )
+
+        #expect(result.rows.count == 1)
+        #expect(result.rows[0].cells[0] == .text("data; with semicolon; inside"))
+        #expect(result.statusMessage.contains("3 statements executed"))
+
+        try await close_session(sessionId: sessionId)
+    }
+
+    @Test("Verify accidental-write read-only mode enforcement")
+    func testAccidentalWriteReadOnlyMode() async throws {
+        let config = getLocalConfig()
+        let sessionId = "swift_test_ro_\(UUID().uuidString)"
+
+        // 1. Establish session in read-only mode
+        let initRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "SELECT 777 as safe_val;",
+            queryId: UUID().uuidString,
+            readOnly: true
+        )
+        #expect(initRes.rows.count == 1)
+
+        // Verify session metadata reflects read-only
+        let info = try await get_session_info(sessionId: sessionId)
+        #expect(info.isReadOnly == true)
+
+        // 2. Direct mutation should be rejected by ReadOnlyViolation
+        do {
+            _ = try await execute_session_query(
+                config: config,
+                sessionId: sessionId,
+                sql: "INSERT INTO dummy_tbl VALUES (1);",
+                queryId: UUID().uuidString,
+                readOnly: true
+            )
+            #expect(Bool(false), "Expected ReadOnlyViolation")
+        } catch let LucidError.ReadOnlyViolation(op) {
+            #expect(!op.isEmpty)
+        } catch {
+            #expect(Bool(false), "Expected ReadOnlyViolation, got: \(error)")
+        }
+
+        // 3. Attempting to disable read-only via SQL should be rejected
+        do {
+            _ = try await execute_session_query(
+                config: config,
+                sessionId: sessionId,
+                sql: "SET default_transaction_read_only = off;",
+                queryId: UUID().uuidString,
+                readOnly: true
+            )
+            #expect(Bool(false), "Expected ReadOnlyViolation")
+        } catch let LucidError.ReadOnlyViolation(op) {
+            #expect(!op.isEmpty)
+        } catch {
+            #expect(Bool(false), "Expected ReadOnlyViolation, got: \(error)")
+        }
+
+        // 4. Read query succeeds
+        let readRes = try await execute_session_query(
+            config: config,
+            sessionId: sessionId,
+            sql: "SELECT 888 as safe_val;",
+            queryId: UUID().uuidString,
+            readOnly: true
+        )
+        #expect(readRes.rows.count == 1)
+
+        // 5. Test dynamic toggle to read-write
+        let updatedInfo = try await set_session_read_only(sessionId: sessionId, readOnly: false)
+        #expect(updatedInfo.isReadOnly == false)
+
+        try await close_session(sessionId: sessionId)
+    }
 }

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
-use deadpool_postgres::Client;
 use futures_util::pin_mut;
 use futures_util::StreamExt;
-use tokio_postgres::CancelToken;
+use tokio_postgres::{CancelToken, Client};
 
+use crate::connection::TransactionStatus;
 use crate::error::LucidError;
 use crate::query::value_mapper::map_cell_value;
 use crate::query::RowData;
@@ -20,6 +20,7 @@ pub struct QueryResult {
     pub status_message: String,
     pub execution_duration_ms: u64,
     pub is_truncated: bool,
+    pub transaction_status: TransactionStatus,
 }
 
 static CANCELLATION_REGISTRY: LazyLock<RwLock<HashMap<String, CancelToken>>> =
@@ -136,6 +137,7 @@ pub async fn execute_sql(
             status_message: "Empty query statement".to_string(),
             execution_duration_ms: 0,
             is_truncated: false,
+            transaction_status: TransactionStatus::Idle,
         });
     }
 
@@ -177,6 +179,7 @@ pub async fn execute_sql(
             status_message,
             execution_duration_ms: duration_ms,
             is_truncated: false,
+            transaction_status: TransactionStatus::Idle,
         })
     } else {
         // Query that returns rows (SELECT, SHOW, EXPLAIN, INSERT/UPDATE/DELETE RETURNING)
@@ -254,6 +257,7 @@ pub async fn execute_sql(
             status_message,
             execution_duration_ms: duration_ms,
             is_truncated,
+            transaction_status: TransactionStatus::Idle,
         })
     }
 }
@@ -272,18 +276,30 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_query_result_instantiation() {
-        let res = QueryResult {
-            columns: vec![],
-            rows: vec![],
-            affected_rows: Some(42),
-            status_message: "42 rows affected".into(),
-            execution_duration_ms: 15,
-            is_truncated: false,
-        };
-        assert_eq!(res.affected_rows, Some(42));
-        assert_eq!(res.execution_duration_ms, 15);
-        assert!(!res.is_truncated);
+    #[tokio::test]
+    async fn test_truncation_followed_by_query() {
+        let user = std::env::var("USER").unwrap_or_else(|_| "postgres".into());
+        let (client, connection) = tokio_postgres::Config::new()
+            .host("localhost")
+            .port(5432)
+            .user(&user)
+            .dbname("postgres")
+            .connect(tokio_postgres::NoTls)
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        // 1. Run query with max_rows = 5 on a 100-row series
+        let res1 = execute_sql(&client, "SELECT generate_series(1, 100);", "q1", Some(5)).await.unwrap();
+        assert_eq!(res1.rows.len(), 5);
+        assert!(res1.is_truncated);
+
+        // 2. Immediately run a second query on the same connection
+        let res2 = execute_sql(&client, "SELECT 42 as answer;", "q2", None).await.unwrap();
+        assert_eq!(res2.rows.len(), 1);
+        assert!(!res2.is_truncated);
     }
 }

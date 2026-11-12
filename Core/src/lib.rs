@@ -8,7 +8,7 @@ pub mod error;
 pub mod query;
 pub mod schema;
 
-pub use connection::ConnectionConfig;
+pub use connection::{ConnectionConfig, SessionInfo, TransactionStatus};
 pub use error::LucidError;
 pub use query::{CellValue, QueryResult, RecordPage, RowData};
 pub use schema::{ColumnMetadata, TableInfo};
@@ -172,17 +172,25 @@ pub async fn fetch_table_page(
 }
 
 #[uniffi::export]
-pub async fn execute_query(
+pub async fn execute_session_query(
     config: ConnectionConfig,
+    session_id: String,
     sql: String,
     query_id: String,
     max_rows: Option<u32>,
+    read_only: bool,
 ) -> Result<QueryResult, LucidError> {
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
-            let client = pool.get().await?;
-            query::execute_sql(&client, &sql, &query_id, max_rows).await
+            connection::execute_session_script(
+                &config,
+                &session_id,
+                &sql,
+                &query_id,
+                max_rows,
+                read_only,
+            )
+            .await
         })
         .await
         .map_err(|e| LucidError::DatabaseError {
@@ -190,6 +198,69 @@ pub async fn execute_query(
             message: e.to_string(),
             detail: None,
         })?
+}
+
+#[uniffi::export]
+pub async fn close_session(session_id: String) -> Result<(), LucidError> {
+    get_runtime()
+        .spawn(async move {
+            connection::close_session(&session_id).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn set_session_read_only(
+    session_id: String,
+    read_only: bool,
+) -> Result<SessionInfo, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            connection::set_session_read_only(&session_id, read_only).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn get_session_info(session_id: String) -> Result<SessionInfo, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            connection::get_session_info(&session_id).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn execute_query(
+    config: ConnectionConfig,
+    sql: String,
+    query_id: String,
+    max_rows: Option<u32>,
+) -> Result<QueryResult, LucidError> {
+    execute_session_query(
+        config,
+        "default_editor".to_string(),
+        sql,
+        query_id,
+        max_rows,
+        false,
+    )
+    .await
 }
 
 #[uniffi::export]

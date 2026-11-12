@@ -8,6 +8,8 @@ extension RecordPage: @unchecked Sendable {}
 extension RowData: @unchecked Sendable {}
 extension CellValue: @unchecked Sendable {}
 extension QueryResult: @unchecked Sendable {}
+extension SessionInfo: @unchecked Sendable {}
+extension TransactionStatus: @unchecked Sendable {}
 
 // Provide snake_case aliases matching Rust/plan spec
 public func bridge_ping() -> String {
@@ -61,4 +63,34 @@ public func execute_query(
 
 public func cancel_query(queryId: String) async throws -> Bool {
     try await cancelQuery(queryId: queryId)
+}
+
+public func execute_session_query(
+    config: ConnectionConfig,
+    sessionId: String,
+    sql: String,
+    queryId: String,
+    maxRows: UInt32? = nil,
+    readOnly: Bool = false
+) async throws -> QueryResult {
+    try await executeSessionQuery(
+        config: config,
+        sessionId: sessionId,
+        sql: sql,
+        queryId: queryId,
+        maxRows: maxRows,
+        readOnly: readOnly
+    )
+}
+
+public func close_session(sessionId: String) async throws {
+    try await closeSession(sessionId: sessionId)
+}
+
+public func set_session_read_only(sessionId: String, readOnly: Bool) async throws -> SessionInfo {
+    try await setSessionReadOnly(sessionId: sessionId, readOnly: readOnly)
+}
+
+public func get_session_info(sessionId: String) async throws -> SessionInfo {
+    try await getSessionInfo(sessionId: sessionId)
 }

@@ -1,5 +1,6 @@
 pub mod execute;
 pub mod paged_table;
+pub mod splitter;
 pub mod value_mapper;
 
 pub use execute::{cancel_active_query, execute_sql, QueryResult};

@@ -29,6 +29,10 @@ public final class SqlEditorViewModel: @unchecked Sendable {
     public var selectedSql: String? = nil
     public var maxRows: UInt32 = 1000
 
+    public var sessionId: String = UUID().uuidString
+    public var transactionStatus: TransactionStatus = .idle
+    public var isReadOnly: Bool = false
+
     private var executionTask: Task<Void, Never>? = nil
 
     public init() {}
@@ -50,24 +54,37 @@ public final class SqlEditorViewModel: @unchecked Sendable {
         self.activeQueryId = queryId
         self.queryState = .running(queryId: queryId, startedAt: Date())
 
-        executionTask = Task { [weak self, config, queryId, maxRows] in
+        let currentSessionId = self.sessionId
+        let currentReadOnly = self.isReadOnly
+
+        executionTask = Task { [weak self, config, currentSessionId, queryId, maxRows, currentReadOnly] in
             do {
-                let result = try await execute_query(
+                let result = try await execute_session_query(
                     config: config,
+                    sessionId: currentSessionId,
                     sql: trimmed,
                     queryId: queryId,
-                    maxRows: maxRows
+                    maxRows: maxRows,
+                    readOnly: currentReadOnly
                 )
 
                 await MainActor.run {
                     guard let self = self, self.activeQueryId == queryId else { return }
                     self.queryState = .success(result)
+                    self.transactionStatus = result.transactionStatus
                     self.activeQueryId = nil
                 }
             } catch let error as LucidError {
                 await MainActor.run {
                     guard let self = self, self.activeQueryId == queryId else { return }
                     self.activeQueryId = nil
+
+                    if case .DatabaseError(let code, _, _) = error, code == "25P02" {
+                        self.transactionStatus = .failedTransaction
+                    } else if case .QueryCancelled = error, self.transactionStatus == .inTransaction {
+                        self.transactionStatus = .failedTransaction
+                    }
+
                     switch error {
                     case .QueryCancelled:
                         self.queryState = .error("Query was cancelled by user.")
@@ -80,7 +97,7 @@ public final class SqlEditorViewModel: @unchecked Sendable {
                     case .ConnectionFailed(let reason):
                         self.queryState = .error("Connection failed: \(reason)")
                     case .ReadOnlyViolation(let op):
-                        self.queryState = .error("Read-only mode violation: \(op)")
+                        self.queryState = .error("Read-Only Mode: \(op)")
                     default:
                         self.queryState = .error(error.localizedDescription)
                     }
@@ -101,6 +118,9 @@ public final class SqlEditorViewModel: @unchecked Sendable {
         self.activeQueryId = nil
         self.executionTask?.cancel()
         self.executionTask = nil
+        if transactionStatus == .inTransaction {
+            self.transactionStatus = .failedTransaction
+        }
         self.queryState = .error("Query was cancelled.")
 
         Task {
@@ -109,9 +129,46 @@ public final class SqlEditorViewModel: @unchecked Sendable {
     }
 
     @MainActor
+    public func toggleReadOnly(config: ConnectionConfig) {
+        if transactionStatus == .inTransaction {
+            self.queryState = .error("Cannot toggle read-only mode while inside an active transaction. Commit or rollback first.")
+            return
+        }
+
+        let newSetting = !isReadOnly
+        let currentSessionId = self.sessionId
+
+        Task {
+            do {
+                _ = try await set_session_read_only(sessionId: currentSessionId, readOnly: newSetting)
+                await MainActor.run {
+                    self.isReadOnly = newSetting
+                }
+            } catch {
+                // If session is not yet established, update locally so the next query initializes read-only
+                await MainActor.run {
+                    self.isReadOnly = newSetting
+                }
+            }
+        }
+    }
+
+    @MainActor
+    public func rollback(config: ConnectionConfig) {
+        executeQuery(config: config, selectionOnly: "ROLLBACK;")
+    }
+
+    @MainActor
     public func reset() {
+        let oldSessionId = sessionId
         cancelQuery()
+        self.sessionId = UUID().uuidString
+        self.transactionStatus = .idle
         self.queryState = .idle
         self.activeQueryId = nil
+
+        Task {
+            try? await close_session(sessionId: oldSessionId)
+        }
     }
 }

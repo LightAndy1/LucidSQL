@@ -56,6 +56,50 @@ public struct SqlEditorContainerView: View {
 
                     Spacer()
 
+                    // Transaction Status Indicator
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(transactionStatusColor)
+                            .frame(width: 6, height: 6)
+
+                        Text(transactionStatusText)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(transactionStatusColor)
+
+                        if viewModel.transactionStatus == .failedTransaction {
+                            Button("Rollback") {
+                                viewModel.rollback(config: config)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .tint(.red)
+                            .help("Issue ROLLBACK to unblock the aborted transaction")
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(transactionStatusColor.opacity(0.12), in: Capsule())
+
+                    // Read-Only Guardrail Toggle
+                    Button {
+                        viewModel.toggleReadOnly(config: config)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: viewModel.isReadOnly ? "lock.fill" : "lock.open")
+                                .font(.system(size: 10))
+                            Text(viewModel.isReadOnly ? "Read-Only" : "Read-Write")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(viewModel.isReadOnly ? Color.orange.opacity(0.15) : Color.secondary.opacity(0.1), in: Capsule())
+                        .foregroundStyle(viewModel.isReadOnly ? Color.orange : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(viewModel.isReadOnly
+                        ? "Read-only guardrail is active: writes and DDL are blocked. Click to switch to Read-Write."
+                        : "Click to enable read-only guardrail (prevents accidental writes/DDL in this session)")
+
                     // Safety row limit badge
                     Text("Limit: \(viewModel.maxRows) rows")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -152,6 +196,25 @@ public struct SqlEditorContainerView: View {
                                     .foregroundStyle(.primary)
                                     .lineSpacing(3)
                                     .textSelection(.enabled)
+
+                                if viewModel.transactionStatus == .failedTransaction {
+                                    HStack(spacing: 8) {
+                                        Text("Transaction aborted: commands are ignored until ROLLBACK.")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+
+                                        Spacer()
+
+                                        SecondaryActionButton(
+                                            title: "Rollback Transaction",
+                                            icon: "arrow.uturn.backward",
+                                            size: .small
+                                        ) {
+                                            viewModel.rollback(config: config)
+                                        }
+                                    }
+                                    .padding(.top, 6)
+                                }
                             }
                         }
                         .padding(14)
@@ -242,6 +305,28 @@ public struct SqlEditorContainerView: View {
                 }
             }
             .frame(minHeight: 180)
+        }
+    }
+
+    private var transactionStatusColor: Color {
+        switch viewModel.transactionStatus {
+        case .idle:
+            return Color.secondary
+        case .inTransaction:
+            return Color.orange
+        case .failedTransaction:
+            return Color.red
+        }
+    }
+
+    private var transactionStatusText: String {
+        switch viewModel.transactionStatus {
+        case .idle:
+            return "Idle"
+        case .inTransaction:
+            return "In Transaction"
+        case .failedTransaction:
+            return "Tx Aborted"
         }
     }
 }
