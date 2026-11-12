@@ -16,7 +16,7 @@ final class ConnectionDialogModel: ObservableObject {
     @Published var testResultMessage: String? = nil
     @Published var testResultIsError: Bool = false
 
-    private let initialProfile: ConnectionProfile
+    fileprivate let initialProfile: ConnectionProfile
 
     init(profile: ConnectionProfile) {
         self.initialProfile = profile
@@ -70,13 +70,16 @@ final class ConnectionDialogModel: ObservableObject {
 public struct ConnectionDialogView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: ConnectionDialogModel
+    private let profileStore: ConnectionProfileStore
     private let onConnect: (ConnectionProfile, String?) -> Void
 
     public init(
         profile: ConnectionProfile = ConnectionProfile(),
+        profileStore: ConnectionProfileStore = ConnectionProfileStore(),
         onConnect: @escaping (ConnectionProfile, String?) -> Void
     ) {
         _model = StateObject(wrappedValue: ConnectionDialogModel(profile: profile))
+        self.profileStore = profileStore
         self.onConnect = onConnect
     }
 
@@ -304,12 +307,17 @@ public struct ConnectionDialogView: View {
     }
 
     private func saveAndConnect() {
-        let updatedProfile = model.buildUpdatedProfile()
+        let editedProfile = model.buildUpdatedProfile()
+        let resolvedProfile = profileStore.resolveProfileForConnect(
+            initialProfile: model.initialProfile,
+            editedProfile: editedProfile
+        )
+        try? profileStore.saveOrUpdateProfile(resolvedProfile)
         if !model.password.isEmpty {
-            try? KeychainService.savePassword(profileId: updatedProfile.id, password: model.password)
+            try? KeychainService.savePassword(profileId: resolvedProfile.id, password: model.password)
         }
 
-        onConnect(updatedProfile, model.password.isEmpty ? nil : model.password)
+        onConnect(resolvedProfile, model.password.isEmpty ? nil : model.password)
         dismiss()
     }
 }

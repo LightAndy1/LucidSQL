@@ -93,6 +93,18 @@ public func close_session(sessionId: String) async throws {
     try await closeSession(sessionId: sessionId)
 }
 
+public func close_all_sessions() async throws {
+    try await closeAllSessions()
+}
+
+public func active_session_count() -> UInt32 {
+    activeSessionCount()
+}
+
+public func max_dedicated_sessions() -> UInt32 {
+    maxDedicatedSessions()
+}
+
 public func set_session_read_only(sessionId: String, readOnly: Bool) async throws -> SessionInfo {
     try await setSessionReadOnly(sessionId: sessionId, readOnly: readOnly)
 }

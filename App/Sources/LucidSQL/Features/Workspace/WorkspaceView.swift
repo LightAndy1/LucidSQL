@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import LucidSQLBridge
 
 @MainActor
@@ -14,33 +15,81 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var isShowingConnectionSheet: Bool = false
     @Published public var selectedTable: String = ""
     @Published public var currentMode: WorkspaceMode = .sqlEditor
-    public var tableViewModel = TableDataViewModel()
-    public var sqlEditorViewModel = SqlEditorViewModel()
+    @Published public var showingDisconnectSessionWarning: Bool = false
+    @Published public var disconnectWarningMessage: String = ""
 
-    public init() {
+    public var tableViewModel = TableDataViewModel()
+    public let sqlWorkspace: SqlWorkspaceViewModel
+    public let profileStore: ConnectionProfileStore
+
+    private var terminateObserver: NSObjectProtocol? = nil
+
+    public var sqlEditorViewModel: SqlEditorViewModel {
+        sqlWorkspace.activeTab ?? SqlEditorViewModel()
+    }
+
+    public init(
+        profileStore: ConnectionProfileStore = ConnectionProfileStore(),
+        draftStore: SqlDraftStore = SqlDraftStore()
+    ) {
+        self.profileStore = profileStore
+        self.sqlWorkspace = SqlWorkspaceViewModel(draftStore: draftStore)
         bindReadOnlySync()
+        registerTerminateObserver()
+    }
+
+    deinit {
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
+        }
+    }
+
+    private func registerTerminateObserver() {
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sqlWorkspace.flushDrafts()
+            }
+        }
     }
 
     private func bindReadOnlySync() {
-        sqlEditorViewModel.onReadOnlyChanged = { [weak self] newValue in
+        sqlWorkspace.onReadOnlyChanged = { [weak self] newValue in
             self?.tableViewModel.isReadOnly = newValue
         }
     }
 
     public func toggleReadOnly() {
         guard let config = activeConfig else { return }
-        if sqlEditorViewModel.transactionStatus == .inTransaction {
-            tableViewModel.errorMessage = "Cannot toggle read-only mode while inside an active SQL Editor transaction. Commit or rollback first."
+        if let activeTab = sqlWorkspace.activeTab, activeTab.transactionStatus == .inTransaction {
+            tableViewModel.errorMessage = "Cannot toggle read-only mode while inside an active SQL Editor transaction in \"\(activeTab.title)\". Commit or rollback first."
             return
         }
-        sqlEditorViewModel.toggleReadOnly(config: config)
+        if let activeTab = sqlWorkspace.activeTab {
+            activeTab.toggleReadOnly(config: config)
+        } else {
+            let newValue = !tableViewModel.isReadOnly
+            tableViewModel.isReadOnly = newValue
+            sqlWorkspace.defaultReadOnly = newValue
+        }
     }
 
     public func connect(profile: ConnectionProfile, password: String?) {
+        try? profileStore.saveOrUpdateProfile(profile)
         self.activeProfile = profile
         self.activeConfig = profile.toRustConfig(password: password)
         self.currentMode = .sqlEditor
-        self.tableViewModel.isReadOnly = self.sqlEditorViewModel.isReadOnly
+        self.sqlWorkspace.activate(profileId: profile.id, readOnlyDefault: self.tableViewModel.isReadOnly)
+        self.tableViewModel.isReadOnly = self.sqlWorkspace.activeTab?.isReadOnly ?? self.sqlWorkspace.defaultReadOnly
+    }
+
+    public func openNewSqlTab() {
+        guard activeConfig != nil else { return }
+        self.currentMode = .sqlEditor
+        self.sqlWorkspace.createTab()
     }
 
     public func loadTable(schema: String, table: String) async {
@@ -58,23 +107,53 @@ public final class WorkspaceModel: ObservableObject {
     public func disconnect() {
         tableViewModel.safeNavigate { [weak self] in
             guard let self = self else { return }
-            let currentReadOnly = self.sqlEditorViewModel.isReadOnly
-            self.sqlEditorViewModel.reset()
-            self.activeProfile = nil
-            self.activeConfig = nil
-            self.selectedTable = ""
-            self.currentMode = .sqlEditor
-            self.tableViewModel = TableDataViewModel()
-            self.tableViewModel.isReadOnly = currentReadOnly
+            let activeTabs = self.sqlWorkspace.tabsWithActiveWork
+            if !activeTabs.isEmpty {
+                let details = activeTabs.map { tab in
+                    var parts: [String] = []
+                    if tab.isRunning { parts.append("query running") }
+                    if tab.transactionStatus == .inTransaction { parts.append("uncommitted transaction") }
+                    if tab.transactionStatus == .failedTransaction { parts.append("aborted transaction") }
+                    return "• \(tab.title) (\(parts.joined(separator: ", ")))"
+                }.joined(separator: "\n")
+                self.disconnectWarningMessage =
+                    "The following SQL tabs have active work that will be cancelled or rolled back on disconnect:\n\n\(details)\n\nSQL drafts will remain saved for this profile, but temporary tables and session settings will be lost."
+                self.showingDisconnectSessionWarning = true
+            } else {
+                Task { @MainActor in
+                    await self.performConfirmedDisconnect()
+                }
+            }
         }
+    }
+
+    public func performConfirmedDisconnect() async {
+        showingDisconnectSessionWarning = false
+        disconnectWarningMessage = ""
+        let currentReadOnly = sqlWorkspace.defaultReadOnly
+        await sqlWorkspace.closeAllSessionsOnDisconnect()
+        try? await close_all_sessions()
+        self.activeProfile = nil
+        self.activeConfig = nil
+        self.selectedTable = ""
+        self.currentMode = .sqlEditor
+        self.tableViewModel = TableDataViewModel()
+        self.tableViewModel.isReadOnly = currentReadOnly
+    }
+
+    public func cancelDisconnect() {
+        showingDisconnectSessionWarning = false
+        disconnectWarningMessage = ""
     }
 }
 
 public struct WorkspaceView: View {
-    @StateObject private var model = WorkspaceModel()
+    @StateObject private var model: WorkspaceModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    public init() {}
+    public init(model: WorkspaceModel? = nil) {
+        _model = StateObject(wrappedValue: model ?? WorkspaceModel())
+    }
 
     public var body: some View {
         NavigationSplitView {
@@ -120,7 +199,7 @@ public struct WorkspaceView: View {
                 if let config = model.activeConfig {
                     switch model.currentMode {
                     case .sqlEditor:
-                        SqlEditorContainerView(viewModel: model.sqlEditorViewModel, config: config)
+                        SqlEditorContainerView(workspace: model.sqlWorkspace, config: config)
                     case .tableData:
                         if !model.selectedTable.isEmpty {
                             TableDataContainerView(
@@ -196,17 +275,45 @@ public struct WorkspaceView: View {
                 WorkspaceDetailBackground(reduceTransparency: reduceTransparency)
                     .ignoresSafeArea()
             }
+            .background {
+                if model.activeConfig != nil {
+                    HStack(spacing: 0) {
+                        Button("") {
+                            model.currentMode = .sqlEditor
+                        }
+                        .keyboardShortcut("1", modifiers: [.command])
+
+                        Button("") {
+                            model.currentMode = .tableData
+                        }
+                        .keyboardShortcut("2", modifiers: [.command])
+                    }
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+                }
+            }
         }
         .toolbar {
             if model.activeConfig != nil {
                 ToolbarItem(placement: .automatic) {
-                    Picker("View", selection: $model.currentMode) {
-                        Label("SQL Editor", systemImage: "terminal").tag(WorkspaceModel.WorkspaceMode.sqlEditor)
-                        Label("Table Data", systemImage: "tablecells").tag(WorkspaceModel.WorkspaceMode.tableData)
+                    HStack(spacing: 6) {
+                        Picker("View", selection: $model.currentMode) {
+                            Label("SQL Editor", systemImage: "terminal").tag(WorkspaceModel.WorkspaceMode.sqlEditor)
+                            Label("Table Data", systemImage: "tablecells").tag(WorkspaceModel.WorkspaceMode.tableData)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 190)
+                        .help("Switch between SQL Editor (⌘1) and Table Data (⌘2)")
+
+                        Button {
+                            model.openNewSqlTab()
+                        } label: {
+                            Image(systemName: "plus.rectangle.on.rectangle")
+                        }
+                        .keyboardShortcut("t", modifiers: [.command])
+                        .help("New SQL Tab (⌘T)")
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 190)
-                    .help("Switch view (⌘T for SQL Editor)")
                 }
             }
 
@@ -261,10 +368,23 @@ public struct WorkspaceView: View {
         }
         .sheet(isPresented: $model.isShowingConnectionSheet) {
             ConnectionDialogView(
-                profile: model.activeProfile ?? ConnectionProfile()
+                profile: model.activeProfile ?? model.profileStore.mostRecentProfile() ?? ConnectionProfile(),
+                profileStore: model.profileStore
             ) { profile, password in
                 model.connect(profile: profile, password: password)
             }
+        }
+        .alert("Active SQL Sessions", isPresented: $model.showingDisconnectSessionWarning) {
+            Button("Disconnect & Rollback", role: .destructive) {
+                Task { @MainActor in
+                    await model.performConfirmedDisconnect()
+                }
+            }
+            Button("Stay Connected", role: .cancel) {
+                model.cancelDisconnect()
+            }
+        } message: {
+            Text(model.disconnectWarningMessage)
         }
     }
 }

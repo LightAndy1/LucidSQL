@@ -254,6 +254,28 @@ pub async fn close_session(session_id: String) -> Result<(), LucidError> {
 }
 
 #[uniffi::export]
+pub async fn close_all_sessions() -> Result<(), LucidError> {
+    get_runtime()
+        .spawn(async move { connection::close_all_sessions().await })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub fn active_session_count() -> u32 {
+    connection::active_session_count()
+}
+
+#[uniffi::export]
+pub fn max_dedicated_sessions() -> u32 {
+    connection::max_dedicated_sessions()
+}
+
+#[uniffi::export]
 pub async fn set_session_read_only(
     session_id: String,
     read_only: bool,

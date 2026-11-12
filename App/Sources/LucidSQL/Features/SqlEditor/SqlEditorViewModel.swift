@@ -3,14 +3,31 @@ import Observation
 import LucidSQLBridge
 
 @Observable
-public final class SqlEditorViewModel: @unchecked Sendable {
-    public var sqlText: String = """
+public final class SqlEditorViewModel: Identifiable, @unchecked Sendable {
+    public static let defaultStarterSql: String = """
     -- Write your PostgreSQL query here
     -- Press ⌘⏎ to execute the query or selection
     SELECT table_schema, table_name, table_type 
     FROM information_schema.tables 
     LIMIT 20;
     """
+
+    public let id: UUID
+    public var title: String
+    public var sqlText: String {
+        didSet {
+            if sqlText != oldValue {
+                onDraftChanged?()
+            }
+        }
+    }
+    public var selectedRange: NSRange = NSRange(location: 0, length: 0) {
+        didSet {
+            if selectedRange != oldValue {
+                onDraftChanged?()
+            }
+        }
+    }
 
     public enum QueryState: Equatable {
         case idle
@@ -29,18 +46,36 @@ public final class SqlEditorViewModel: @unchecked Sendable {
     public var selectedSql: String? = nil
     public var maxRows: UInt32 = 1000
 
-    public var sessionId: String = UUID().uuidString
+    public var sessionId: String
+    public var hasActiveSession: Bool = false
     public var transactionStatus: TransactionStatus = .idle
     public var isReadOnly: Bool = false
+    public var sessionBannerMessage: String? = nil
     public var onReadOnlyChanged: ((Bool) -> Void)? = nil
+    public var onDraftChanged: (() -> Void)? = nil
 
     private var executionTask: Task<Void, Never>? = nil
 
-    public init() {}
+    public init(
+        id: UUID = UUID(),
+        title: String = "Query 1",
+        sqlText: String = SqlEditorViewModel.defaultStarterSql,
+        selectedRange: NSRange = NSRange(location: 0, length: 0),
+        isReadOnly: Bool = false,
+        sessionBannerMessage: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.sqlText = sqlText
+        self.selectedRange = selectedRange
+        self.sessionId = "tab_\(id.uuidString)"
+        self.isReadOnly = isReadOnly
+        self.sessionBannerMessage = sessionBannerMessage
+    }
 
     @MainActor
     public func executeQuery(config: ConnectionConfig, selectionOnly: String? = nil) {
-        // Cancel any already running query before starting a new one
+        // Cancel any already running query in this tab before starting a new one
         cancelQuery()
 
         let rawTarget = selectionOnly ?? selectedSql ?? sqlText
@@ -57,8 +92,9 @@ public final class SqlEditorViewModel: @unchecked Sendable {
 
         let currentSessionId = self.sessionId
         let currentReadOnly = self.isReadOnly
+        let hadLiveSessionBeforeExecution = self.hasActiveSession
 
-        executionTask = Task { [weak self, config, currentSessionId, queryId, maxRows, currentReadOnly] in
+        executionTask = Task { [weak self, config, currentSessionId, queryId, maxRows, currentReadOnly, hadLiveSessionBeforeExecution] in
             do {
                 let result = try await execute_session_query(
                     config: config,
@@ -71,6 +107,8 @@ public final class SqlEditorViewModel: @unchecked Sendable {
 
                 await MainActor.run {
                     guard let self = self, self.activeQueryId == queryId else { return }
+                    self.hasActiveSession = true
+                    self.sessionBannerMessage = nil
                     self.queryState = .success(result)
                     self.transactionStatus = result.transactionStatus
                     self.activeQueryId = nil
@@ -80,22 +118,34 @@ public final class SqlEditorViewModel: @unchecked Sendable {
                     guard let self = self, self.activeQueryId == queryId else { return }
                     self.activeQueryId = nil
 
-                    if case .DatabaseError(let code, _, _) = error, code == "25P02" {
-                        self.transactionStatus = .failedTransaction
-                    } else if case .QueryCancelled = error, self.transactionStatus == .inTransaction {
-                        self.transactionStatus = .failedTransaction
-                    }
-
                     switch error {
                     case .QueryCancelled:
+                        if self.transactionStatus == .inTransaction {
+                            self.transactionStatus = .failedTransaction
+                        }
                         self.queryState = .error("Query was cancelled by user.")
                     case .QueryTimedOut(let durationMs):
+                        if self.transactionStatus == .inTransaction {
+                            self.transactionStatus = .failedTransaction
+                        }
                         self.queryState = .error("Query timed out after \(durationMs) ms.")
                     case .DatabaseError(let code, let message, _):
+                        self.hasActiveSession = true
+                        self.sessionBannerMessage = nil
+                        if code == "25P02" || self.transactionStatus == .inTransaction {
+                            self.transactionStatus = .failedTransaction
+                        }
                         self.queryState = .error("[\(code)] \(message)")
                     case .AuthenticationFailed(let message):
+                        self.hasActiveSession = false
+                        self.transactionStatus = .idle
                         self.queryState = .error("Authentication failed: \(message)")
                     case .ConnectionFailed(let reason):
+                        self.hasActiveSession = false
+                        self.transactionStatus = .idle
+                        if hadLiveSessionBeforeExecution || reason.lowercased().contains("lost") || reason.lowercased().contains("closed") {
+                            self.sessionBannerMessage = "Session connection was lost. Temporary tables, session settings, and any uncommitted transactions from the prior connection were discarded."
+                        }
                         self.queryState = .error("Connection failed: \(reason)")
                     case .ReadOnlyViolation(let op):
                         self.queryState = .error("Read-Only Mode: \(op)")
@@ -137,6 +187,13 @@ public final class SqlEditorViewModel: @unchecked Sendable {
         }
 
         let newSetting = !isReadOnly
+        guard hasActiveSession else {
+            self.isReadOnly = newSetting
+            self.onReadOnlyChanged?(newSetting)
+            self.onDraftChanged?()
+            return
+        }
+
         let currentSessionId = self.sessionId
 
         Task {
@@ -145,12 +202,14 @@ public final class SqlEditorViewModel: @unchecked Sendable {
                 await MainActor.run {
                     self.isReadOnly = newSetting
                     self.onReadOnlyChanged?(newSetting)
+                    self.onDraftChanged?()
                 }
             } catch {
-                // If session is not yet established, update locally so the next query initializes read-only
                 await MainActor.run {
+                    self.hasActiveSession = false
                     self.isReadOnly = newSetting
                     self.onReadOnlyChanged?(newSetting)
+                    self.onDraftChanged?()
                 }
             }
         }
@@ -164,14 +223,46 @@ public final class SqlEditorViewModel: @unchecked Sendable {
     @MainActor
     public func reset() {
         let oldSessionId = sessionId
+        let shouldClose = hasActiveSession || activeQueryId != nil
         cancelQuery()
-        self.sessionId = UUID().uuidString
+        self.sessionId = "tab_\(id.uuidString)_\(UUID().uuidString.prefix(8))"
+        self.hasActiveSession = false
         self.transactionStatus = .idle
         self.queryState = .idle
         self.activeQueryId = nil
+        self.sessionBannerMessage = nil
 
-        Task {
+        if shouldClose {
+            Task {
+                try? await close_session(sessionId: oldSessionId)
+            }
+        }
+    }
+
+    @MainActor
+    public func cancelAndCloseSession(bannerMessage: String? = nil) async {
+        let oldSessionId = sessionId
+        let pendingQueryId = activeQueryId
+        let shouldClose = hasActiveSession || pendingQueryId != nil
+
+        if let queryId = pendingQueryId {
+            self.activeQueryId = nil
+            self.executionTask?.cancel()
+            self.executionTask = nil
+            self.queryState = .error("Query was cancelled.")
+            _ = try? await cancel_query(queryId: queryId)
+        }
+
+        if shouldClose {
             try? await close_session(sessionId: oldSessionId)
+        }
+
+        self.sessionId = "tab_\(id.uuidString)_\(UUID().uuidString.prefix(8))"
+        self.hasActiveSession = false
+        self.transactionStatus = .idle
+        self.activeQueryId = nil
+        if let bannerMessage {
+            self.sessionBannerMessage = bannerMessage
         }
     }
 }

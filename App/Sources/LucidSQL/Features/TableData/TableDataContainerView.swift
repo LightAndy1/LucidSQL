@@ -329,7 +329,10 @@ public struct TableDataContainerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(NSColor.textBackgroundColor))
             } else {
-                DataTableView(viewModel: viewModel)
+                DataTableView(
+                    viewModel: viewModel,
+                    renderSignature: DataTableView.RenderSignature(from: viewModel)
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(NSColor.textBackgroundColor))
             }

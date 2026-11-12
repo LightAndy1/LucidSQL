@@ -3,10 +3,41 @@ import SwiftUI
 import LucidSQLBridge
 
 public struct DataTableView: NSViewRepresentable {
-    public let viewModel: TableDataViewModel
+    public struct RenderSignature: Equatable {
+        public let tableIdentity: String
+        public let columnCount: Int
+        public let rowCount: Int
+        public let dataVersion: UInt64
+        public let offset: UInt64
+        public let durationMs: UInt64
+        public let stagedEditCount: Int
+        public let stagedInsertCount: Int
+        public let stagedDeleteCount: Int
+        public let isEditable: Bool
+        public let pendingActiveCell: TableDataViewModel.GridCoordinate?
 
-    public init(viewModel: TableDataViewModel) {
+        @MainActor
+        public init(from viewModel: TableDataViewModel) {
+            self.tableIdentity = "\(viewModel.currentSchema).\(viewModel.currentTable)"
+            self.columnCount = viewModel.columns.count
+            self.rowCount = viewModel.totalGridRowCount
+            self.dataVersion = viewModel.dataVersion
+            self.offset = viewModel.offset
+            self.durationMs = viewModel.executionDurationMs
+            self.stagedEditCount = viewModel.stagedEdits.count
+            self.stagedInsertCount = viewModel.stagedInserts.count
+            self.stagedDeleteCount = viewModel.stagedDeletes.count
+            self.isEditable = viewModel.isEditable
+            self.pendingActiveCell = viewModel.pendingActiveCell
+        }
+    }
+
+    public let viewModel: TableDataViewModel
+    public let renderSignature: RenderSignature?
+
+    public init(viewModel: TableDataViewModel, renderSignature: RenderSignature? = nil) {
         self.viewModel = viewModel
+        self.renderSignature = renderSignature
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -135,15 +166,47 @@ public struct DataTableView: NSViewRepresentable {
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tableView = nsView.documentView as? LucidDataTableView else { return }
         context.coordinator.viewModel = viewModel
+        context.coordinator.tableViewRef = tableView
+        context.coordinator.syncTableViewIfNeeded(tableView)
+    }
 
-        if context.coordinator.isEditingCell {
-            return
+    public func makeCoordinator() -> Coordinator {
+        Coordinator(viewModel: viewModel)
+    }
+
+    public final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var viewModel: TableDataViewModel
+        weak var tableViewRef: LucidDataTableView?
+        var isEditingCell: Bool = false {
+            didSet {
+                if !isEditingCell, let tableView = tableViewRef {
+                    syncTableViewIfNeeded(tableView)
+                }
+            }
+        }
+        private var lastColumnHash: Int = 0
+        private var lastTableIdentity: String = ""
+        private var lastRowCount: Int = -1
+        private var lastDataVersion: UInt64 = 0
+        private var lastOffset: UInt64 = 0
+        private var lastDurationMs: UInt64 = 0
+        private var lastStagedEdits: [TableDataViewModel.GridCoordinate: CellValue] = [:]
+        private var lastStagedInserts: [TableDataViewModel.StagedInsertRow] = []
+        private var lastStagedDeletes: Set<Int> = []
+        private var lastIsEditable: Bool = false
+
+        init(viewModel: TableDataViewModel) {
+            self.viewModel = viewModel
         }
 
-        let columnsChanged = context.coordinator.syncColumns(tableView: tableView, columns: viewModel.columns)
-        let dataChanged = context.coordinator.hasStateChanged(viewModel: viewModel)
+        func syncTableViewIfNeeded(_ tableView: LucidDataTableView) {
+            guard !isEditingCell else { return }
 
-        if columnsChanged || dataChanged {
+            let columnsChanged = syncColumns(tableView: tableView, columns: viewModel.columns)
+            let dataChanged = hasStateChanged(viewModel: viewModel)
+
+            guard columnsChanged || dataChanged else { return }
+
             let prevRow = tableView.activeRow
             let prevCol = tableView.activeColumn
 
@@ -171,29 +234,6 @@ public struct DataTableView: NSViewRepresentable {
                 tableView.activeColumn = -1
                 viewModel.selectedRowIndex = nil
             }
-        }
-    }
-
-    public func makeCoordinator() -> Coordinator {
-        Coordinator(viewModel: viewModel)
-    }
-
-    public final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-        var viewModel: TableDataViewModel
-        var isEditingCell: Bool = false
-        private var lastColumnHash: Int = 0
-        private var lastTableIdentity: String = ""
-        private var lastRowCount: Int = -1
-        private var lastDataVersion: UInt64 = 0
-        private var lastOffset: UInt64 = 0
-        private var lastDurationMs: UInt64 = 0
-        private var lastStagedEdits: [TableDataViewModel.GridCoordinate: CellValue] = [:]
-        private var lastStagedInserts: [TableDataViewModel.StagedInsertRow] = []
-        private var lastStagedDeletes: Set<Int> = []
-        private var lastIsEditable: Bool = false
-
-        init(viewModel: TableDataViewModel) {
-            self.viewModel = viewModel
         }
 
         func syncSnapshot(from vm: TableDataViewModel) {
