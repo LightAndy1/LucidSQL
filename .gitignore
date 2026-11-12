@@ -29,6 +29,7 @@ target/
 
 # Generated UniFFI / Bridge Artifacts
 /App/Bridge/Generated/
+/App/Bridge/lucidsql_coreFFI/include/
 
 # Local Secrets, Credentials & Certificates
 *.env
@@ -54,3 +55,15 @@ target/
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Agent Configurations, Skills, and Local Planning Docs (Local Only)
+/AGENTS.md
+/docs/HANDOFF.md
+/docs/superpowers/
+/.agents/
+/.claude/
+/.cursor/
+/.gemini/
+/.opencode/
+/.rtk/
+/.windsurf/
