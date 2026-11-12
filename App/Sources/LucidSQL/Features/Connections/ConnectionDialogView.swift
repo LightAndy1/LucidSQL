@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import LucidSQLBridge
 
 @MainActor
@@ -10,6 +12,7 @@ final class ConnectionDialogModel: ObservableObject {
     @Published var user: String
     @Published var password: String
     @Published var sslMode: String
+    @Published var sslRootCertPath: String
     @Published var timeoutSeconds: Int
 
     @Published var isTesting: Bool = false
@@ -27,11 +30,53 @@ final class ConnectionDialogModel: ObservableObject {
         self.user = profile.user
         self.password = (try? KeychainService.getPassword(profileId: profile.id)) ?? ""
         self.sslMode = profile.sslMode
+        self.sslRootCertPath = profile.sslRootCert ?? ""
         self.timeoutSeconds = Int(profile.timeoutSeconds)
     }
 
+    var requiresCaVerification: Bool {
+        sslMode == "verify-ca" || sslMode == "verify-full"
+    }
+
+    var sslModeSummary: String {
+        switch sslMode {
+        case "disable":
+            return "Plaintext connection (unencrypted). Fails if server requires TLS."
+        case "prefer":
+            return "Encrypts with TLS if supported, otherwise falls back to plaintext. Certificate and hostname are not verified."
+        case "require":
+            return "Requires TLS encryption and rejects plaintext, but skips CA and hostname verification (accepts self-signed certificates)."
+        case "verify-ca":
+            return "Requires TLS and verifies the server certificate chain against system roots or your custom CA file. Hostname mismatch is still permitted."
+        case "verify-full":
+            return "Requires TLS and verifies both CA certificate trust and exact server hostname match."
+        default:
+            return "Strict SSL mode configuration."
+        }
+    }
+
+    func chooseRootCertificateFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Custom CA Root Certificate"
+        panel.message = "Select a PEM (.pem, .crt, .cer) CA certificate for TLS verification."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        var types: [UTType] = []
+        if let pem = UTType(filenameExtension: "pem") { types.append(pem) }
+        if let crt = UTType(filenameExtension: "crt") { types.append(crt) }
+        if let cer = UTType(filenameExtension: "cer") { types.append(cer) }
+        types.append(.x509Certificate)
+        panel.allowedContentTypes = types
+
+        if panel.runModal() == .OK, let url = panel.url {
+            sslRootCertPath = url.path
+        }
+    }
+
     func buildUpdatedProfile() -> ConnectionProfile {
-        ConnectionProfile(
+        let trimmedCert = sslRootCertPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ConnectionProfile(
             id: initialProfile.id,
             name: profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "PostgreSQL" : profileName,
             host: host.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -39,6 +84,7 @@ final class ConnectionDialogModel: ObservableObject {
             database: database.trimmingCharacters(in: .whitespacesAndNewlines),
             user: user.trimmingCharacters(in: .whitespacesAndNewlines),
             sslMode: sslMode,
+            sslRootCert: trimmedCert.isEmpty ? nil : trimmedCert,
             timeoutSeconds: UInt32(timeoutSeconds)
         )
     }
@@ -214,13 +260,49 @@ public struct ConnectionDialogView: View {
                                     .gridColumnAlignment(.trailing)
                                     .font(.system(size: 13))
                                     .foregroundStyle(.secondary)
-                                Picker("", selection: $model.sslMode) {
-                                    Text("Disable").tag("disable")
-                                    Text("Prefer").tag("prefer")
-                                    Text("Require").tag("require")
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Picker("", selection: $model.sslMode) {
+                                            Text("Disable").tag("disable")
+                                            Text("Prefer").tag("prefer")
+                                            Text("Require").tag("require")
+                                            Text("Verify CA").tag("verify-ca")
+                                            Text("Verify Full").tag("verify-full")
+                                        }
+                                        .labelsHidden()
+                                        .pickerStyle(.menu)
+                                        .frame(width: 150)
+                                        Spacer(minLength: 0)
+                                    }
+                                    Text(model.sslModeSummary)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                .pickerStyle(.menu)
-                                .frame(width: 120)
+                            }
+
+                            if model.requiresCaVerification {
+                                GridRow {
+                                    Text("Root CA Cert:")
+                                        .gridColumnAlignment(.trailing)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 6) {
+                                        TextField("System root certificates (optional PEM path)", text: $model.sslRootCertPath)
+                                            .textFieldStyle(.roundedBorder)
+                                            .controlSize(.regular)
+                                        Button("Browse...") {
+                                            model.chooseRootCertificateFile()
+                                        }
+                                        .controlSize(.small)
+                                        if !model.sslRootCertPath.isEmpty {
+                                            Button("Clear") {
+                                                model.sslRootCertPath = ""
+                                            }
+                                            .controlSize(.small)
+                                        }
+                                    }
+                                }
                             }
 
                             GridRow {
@@ -302,7 +384,7 @@ public struct ConnectionDialogView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
         }
-        .frame(width: 530, height: 580)
+        .frame(width: 560, height: 650)
         .background(VisualEffectBackground(material: .sheet, blendingMode: .behindWindow))
     }
 

@@ -292,26 +292,37 @@ public struct TableDataContainerView: View {
             // Error Banner if present
             if let error = viewModel.errorMessage {
                 HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
+                    Image(systemName: viewModel.hasUncertainCommitOutcome ? "exclamationmark.shield.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(viewModel.hasUncertainCommitOutcome ? .orange : .red)
                         .font(.system(size: 12))
                     Text(error)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(viewModel.hasUncertainCommitOutcome ? .orange : .red)
                         .textSelection(.enabled)
                     Spacer()
-                    Button {
-                        viewModel.errorMessage = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9))
+                    if viewModel.hasUncertainCommitOutcome {
+                        Button("Reload & Reconcile") {
+                            Task {
+                                await viewModel.reconcileUncertainCommit(config: config)
+                            }
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                    } else {
+                        Button {
+                            viewModel.errorMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color.red.opacity(0.08))
+                .background((viewModel.hasUncertainCommitOutcome ? Color.orange : Color.red).opacity(0.08))
                 Divider()
             }
 

@@ -13,6 +13,7 @@ struct SqlWorkspaceTabsTests {
             user: NSUserName(),
             password: nil,
             sslMode: "disable",
+            sslRootCert: nil,
             timeoutSeconds: 5
         )
     }
@@ -294,6 +295,7 @@ struct SqlWorkspaceTabsTests {
         let profileStore = ConnectionProfileStore(fileURL: profileURL)
         let draftStore = SqlDraftStore(fileURL: draftURL)
         let workspaceModel = WorkspaceModel(profileStore: profileStore, draftStore: draftStore)
+        workspaceModel.sweepGlobalSessionsOnDisconnect = false
 
         let profile = ConnectionProfile(
             name: "Local Test",

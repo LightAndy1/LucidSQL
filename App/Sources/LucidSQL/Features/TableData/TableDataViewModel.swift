@@ -28,6 +28,9 @@ public final class TableDataViewModel: @unchecked Sendable {
     public var showingReviewSheet: Bool = false
     public var showingUnsavedChangesAlert: Bool = false
     public var pendingNavigationAction: (() -> Void)? = nil
+    public var hasUncertainCommitOutcome: Bool = false
+    public var uncertainCommitOperationsSummary: String? = nil
+    public var uncertainCommitDetails: String? = nil
     public var sortColumn: String? = nil
     public var sortDescending: Bool = false
     public var exportViewModel: CsvExportViewModel? = nil
@@ -118,10 +121,13 @@ public final class TableDataViewModel: @unchecked Sendable {
     }
 
     public var isEditable: Bool {
-        hasPrimaryKey && !isReadOnly && !isSystemSchema
+        hasPrimaryKey && !isReadOnly && !isSystemSchema && !hasUncertainCommitOutcome
     }
 
     public var nonEditableReason: String? {
+        if hasUncertainCommitOutcome {
+            return "Last commit outcome was uncertain. Click Reload & Reconcile before applying further edits."
+        }
         if isReadOnly {
             return "Read-only guardrail is active. Editing is disabled."
         }
@@ -496,6 +502,26 @@ public final class TableDataViewModel: @unchecked Sendable {
         await fetchPage(config: config)
     }
 
+    public func recordUncertainCommitOutcome(message: String) {
+        let pendingOps = stagedSummaryText
+        self.hasUncertainCommitOutcome = true
+        self.uncertainCommitOperationsSummary = pendingOps
+        self.uncertainCommitDetails = message
+        self.errorMessage = "Commit outcome uncertain (\(message)). Do not blindly re-apply — click Reload & Reconcile to check whether your \(pendingOps.isEmpty ? "changes" : pendingOps) actually committed."
+    }
+
+    public func reconcileUncertainCommit(config: ConnectionConfig) async {
+        let pendingOps = uncertainCommitOperationsSummary ?? stagedSummaryText
+        clearStagedChanges()
+        errorMessage = nil
+        showingReviewSheet = false
+        await fetchPage(config: config)
+        if errorMessage == nil {
+            let scopeText = pendingOps.isEmpty ? "staged batch" : pendingOps
+            statusMessage = "Reloaded live rows from PostgreSQL to reconcile uncertain commit (\(scopeText)). Verify whether those changes persisted before editing again."
+        }
+    }
+
     public func safeNavigate(action: @escaping () -> Void) {
         if !hasPendingChanges {
             action()
@@ -637,6 +663,9 @@ public final class TableDataViewModel: @unchecked Sendable {
         stagedInserts.removeAll()
         stagedDeletes.removeAll()
         pendingActiveCell = nil
+        hasUncertainCommitOutcome = false
+        uncertainCommitOperationsSummary = nil
+        uncertainCommitDetails = nil
         dataVersion &+= 1
     }
 
@@ -786,6 +815,11 @@ public final class TableDataViewModel: @unchecked Sendable {
     public func applyStagedEdits(config: ConnectionConfig) async {
         guard hasPendingChanges else { return }
 
+        if hasUncertainCommitOutcome {
+            self.errorMessage = "Previous commit outcome is uncertain — blind re-apply is blocked to prevent duplicate writes. Click Reload & Reconcile to verify live database state first."
+            return
+        }
+
         if isReadOnly {
             self.errorMessage = "Read-only guardrail is active. Mutations are disabled."
             return
@@ -847,7 +881,11 @@ public final class TableDataViewModel: @unchecked Sendable {
             await fetchPage(config: config)
         } catch let error as LucidError {
             self.isApplying = false
-            self.errorMessage = error.userFacingMessage
+            if case .UncertainCommitOutcome = error {
+                recordUncertainCommitOutcome(message: error.userFacingMessage)
+            } else {
+                self.errorMessage = error.userFacingMessage
+            }
         } catch {
             self.isApplying = false
             self.errorMessage = "Failed to apply changes: \(error.userFacingMessage)"

@@ -320,6 +320,23 @@ public final class CsvExportViewModel: Identifiable {
         }
     }
 
+    public func cancelAndWait(timeoutSeconds: Double = 2.0) async {
+        guard isExporting else { return }
+        cancelExport()
+        guard let task = activeTask else { return }
+        let timeoutNs = UInt64(max(0.1, timeoutSeconds) * 1_000_000_000)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                _ = await task.value
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNs)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
     public func revealExportedFileInFinder() {
         guard let path = lastResult?.destinationPath else { return }
         let url = URL(fileURLWithPath: path)

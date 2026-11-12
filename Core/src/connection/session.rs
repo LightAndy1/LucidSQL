@@ -1,15 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::pin_mut;
 use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tokio_postgres::{CancelToken, Client, NoTls};
 
+use crate::connection::tls::{
+    build_rustls_connect, map_postgres_connect_error, CancelTlsTarget, LucidSslMode,
+};
 use crate::connection::ConnectionConfig;
 use crate::error::LucidError;
-use crate::query::execute::{map_postgres_error, register_cancel_token, unregister_cancel_token, QueryResult};
+use crate::query::execute::{
+    map_postgres_error, register_cancel_token_with_tls, unregister_cancel_token, QueryResult,
+};
 use crate::query::splitter::{extract_first_keyword, split_statements};
 use crate::query::value_mapper::map_cell_value;
 use crate::query::RowData;
@@ -39,6 +44,7 @@ pub struct DedicatedSession {
     pub is_read_only: bool,
     pub transaction_status: TransactionStatus,
     pub conn_handle: tokio::task::JoinHandle<()>,
+    pub cancel_tls: CancelTlsTarget,
 }
 
 #[derive(Clone)]
@@ -46,6 +52,7 @@ struct SessionEntry {
     inner: Arc<Mutex<DedicatedSession>>,
     snapshot: Arc<std::sync::RwLock<SessionInfo>>,
     cancel_token: CancelToken,
+    cancel_tls: CancelTlsTarget,
     conn_abort: tokio::task::AbortHandle,
 }
 
@@ -157,6 +164,12 @@ impl SessionManager {
             }
         };
 
+        let ssl_mode = LucidSslMode::parse(&config.ssl_mode)?;
+        let cancel_tls = CancelTlsTarget {
+            ssl_mode,
+            ssl_root_cert: config.ssl_root_cert.clone(),
+        };
+
         let mut pg_config = tokio_postgres::Config::new();
         pg_config.host(&config.host);
         pg_config.port(config.port);
@@ -165,19 +178,32 @@ impl SessionManager {
         if let Some(ref pass) = config.password {
             pg_config.password(pass);
         }
-        pg_config.connect_timeout(std::time::Duration::from_secs(config.timeout_seconds as u64));
+        pg_config.ssl_mode(ssl_mode.to_pg_ssl_mode());
+        pg_config.connect_timeout(Duration::from_secs(config.timeout_seconds.max(1) as u64));
 
-        let (client, connection) = pg_config.connect(NoTls).await.map_err(|e| {
-            LucidError::ConnectionFailed {
-                reason: e.to_string(),
-            }
-        })?;
-
-        let conn_handle = tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Session background connection error: {}", e);
-            }
-        });
+        let (client, conn_handle) =
+            match build_rustls_connect(ssl_mode, config.ssl_root_cert.as_deref())? {
+                Some(tls) => {
+                    let (client, connection) = pg_config
+                        .connect(tls)
+                        .await
+                        .map_err(|e| map_postgres_connect_error(&e))?;
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    (client, conn_handle)
+                }
+                None => {
+                    let (client, connection) = pg_config
+                        .connect(NoTls)
+                        .await
+                        .map_err(|e| map_postgres_connect_error(&e))?;
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    (client, conn_handle)
+                }
+            };
         let conn_abort = conn_handle.abort_handle();
 
         let pid_row = match client.query_one("SELECT pg_backend_pid()", &[]).await {
@@ -217,9 +243,11 @@ impl SessionManager {
                 is_read_only: read_only,
                 transaction_status: TransactionStatus::Idle,
                 conn_handle,
+                cancel_tls: cancel_tls.clone(),
             })),
             snapshot: Arc::new(std::sync::RwLock::new(initial_info)),
             cancel_token,
+            cancel_tls,
             conn_abort,
         };
 
@@ -267,13 +295,20 @@ impl SessionManager {
     async fn close_entry(entry: SessionEntry) {
         if let Ok(session) = entry.inner.try_lock() {
             if session.transaction_status != TransactionStatus::Idle && !session.client.is_closed() {
-                let _ = session.client.batch_execute("ROLLBACK;").await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    session.client.batch_execute("ROLLBACK;"),
+                )
+                .await;
             }
             session.conn_handle.abort();
         } else {
-            // Query is actively running on this session: issue PG cancel packet and close socket
-            // immediately so any uncommitted transaction rolls back cleanly on the server.
-            let _ = entry.cancel_token.cancel_query(NoTls).await;
+            // Query is actively running on this session: issue bounded PG cancel packet and close socket
+            // immediately so any uncommitted transaction rolls back cleanly on the server without hanging UI.
+            let _ = entry
+                .cancel_tls
+                .cancel_with_timeout(&entry.cancel_token, Duration::from_secs(2))
+                .await;
             entry.conn_abort.abort();
         }
     }
@@ -451,7 +486,11 @@ impl SessionManager {
             });
         }
 
-        register_cancel_token(query_id, session.client.cancel_token());
+        register_cancel_token_with_tls(
+            query_id,
+            session.client.cancel_token(),
+            session.cancel_tls.clone(),
+        );
 
         let start_time = Instant::now();
         let total_statements = statements.len();
@@ -819,6 +858,7 @@ mod tests {
             user,
             password: None,
             ssl_mode: "disable".into(),
+            ssl_root_cert: None,
             timeout_seconds: 5,
         }
     }

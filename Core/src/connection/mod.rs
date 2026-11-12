@@ -1,5 +1,6 @@
 pub mod pool;
 pub mod session;
+pub mod tls;
 
 pub use pool::ManagedPool;
 pub use session::{
@@ -16,5 +17,6 @@ pub struct ConnectionConfig {
     pub user: String,
     pub password: Option<String>,
     pub ssl_mode: String,
+    pub ssl_root_cert: Option<String>,
     pub timeout_seconds: u32,
 }

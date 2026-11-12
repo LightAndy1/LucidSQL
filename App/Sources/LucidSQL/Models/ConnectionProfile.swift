@@ -8,6 +8,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public var database: String
     public var user: String
     public var sslMode: String
+    public var sslRootCert: String?
     public var timeoutSeconds: UInt32
 
     public init(
@@ -18,6 +19,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         database: String = "postgres",
         user: String = "postgres",
         sslMode: String = "prefer",
+        sslRootCert: String? = nil,
         timeoutSeconds: UInt32 = 10
     ) {
         self.id = id
@@ -27,18 +29,21 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         self.database = database
         self.user = user
         self.sslMode = sslMode
+        self.sslRootCert = sslRootCert
         self.timeoutSeconds = timeoutSeconds
     }
 
     /// Converts connection profile and an optional resolved password to the Rust ConnectionConfig
     public func toRustConfig(password: String? = nil) -> ConnectionConfig {
-        ConnectionConfig(
+        let trimmedCert = sslRootCert?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ConnectionConfig(
             host: host,
             port: port,
             database: database,
             user: user,
             password: password,
             sslMode: sslMode,
+            sslRootCert: (trimmedCert?.isEmpty == false) ? trimmedCert : nil,
             timeoutSeconds: timeoutSeconds
         )
     }

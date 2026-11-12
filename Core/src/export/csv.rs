@@ -3,16 +3,18 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::{pin_mut, StreamExt};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Notify;
 
+use crate::connection::tls::CancelTlsTarget;
 use crate::connection::{ConnectionConfig, ManagedPool};
 use crate::error::LucidError;
 use crate::query::execute::{
-    cancel_active_query, map_postgres_error, register_cancel_token, unregister_cancel_token,
+    cancel_active_query, map_postgres_error, register_cancel_token_with_tls,
+    unregister_cancel_token,
 };
 use crate::query::{map_cell_value, CellValue, RowData};
 use crate::schema::{query_columns, ColumnMetadata};
@@ -496,6 +498,8 @@ pub async fn export_table_csv(
         return Err(LucidError::QueryCancelled);
     }
 
+    let cancel_tls = CancelTlsTarget::from_config(&config)?;
+
     // Separate transient connection pool (not shared with any SQL tab session).
     let pool = ManagedPool::new(&config)?;
     let client = tokio::select! {
@@ -504,7 +508,7 @@ pub async fn export_table_csv(
         res = pool.get() => res?,
     };
 
-    register_cancel_token(&export_id, client.cancel_token());
+    register_cancel_token_with_tls(&export_id, client.cancel_token(), cancel_tls);
     state_guard.has_cancel_token = true;
 
     if run_state.is_cancelled.load(Ordering::Acquire) {
@@ -526,7 +530,7 @@ pub async fn export_table_csv(
     };
 
     if columns.is_empty() {
-        let _ = client.batch_execute("ROLLBACK;").await;
+        rollback_with_timeout(&client).await;
         return Err(LucidError::DatabaseError {
             code: "42P01".into(),
             message: format!(
@@ -539,7 +543,7 @@ pub async fn export_table_csv(
 
     let order_clause = if let Some(ref sort_col) = request.sort_col {
         if !columns.iter().any(|c| &c.name == sort_col) {
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(LucidError::DatabaseError {
                 code: "42703".into(),
                 message: format!(
@@ -581,14 +585,14 @@ pub async fn export_table_csv(
     let stmt = tokio::select! {
         biased;
         _ = run_state.cancel_notify.notified() => {
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(LucidError::QueryCancelled);
         }
         res = client.prepare(&sql) => {
             match res {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = client.batch_execute("ROLLBACK;").await;
+                    rollback_with_timeout(&client).await;
                     return Err(map_postgres_error(e));
                 }
             }
@@ -598,14 +602,14 @@ pub async fn export_table_csv(
     let stream = tokio::select! {
         biased;
         _ = run_state.cancel_notify.notified() => {
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(LucidError::QueryCancelled);
         }
         res = client.query_raw(&stmt, std::iter::empty::<i32>()) => {
             match res {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = client.batch_execute("ROLLBACK;").await;
+                    rollback_with_timeout(&client).await;
                     return Err(map_postgres_error(e));
                 }
             }
@@ -616,7 +620,7 @@ pub async fn export_table_csv(
         Ok(w) => w,
         Err(e) => {
             drop(stream);
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(e);
         }
     };
@@ -634,7 +638,7 @@ pub async fn export_table_csv(
         drop(writer);
         drop(stream);
         temp_guard.cleanup_now().await;
-        let _ = client.batch_execute("ROLLBACK;").await;
+        rollback_with_timeout(&client).await;
         return Err(LucidError::DatabaseError {
             code: "58030".into(),
             message: format!("Failed writing CSV header: {}", e),
@@ -653,7 +657,7 @@ pub async fn export_table_csv(
             drop(writer);
             drop(stream);
             temp_guard.cleanup_now().await;
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(LucidError::QueryCancelled);
         }
 
@@ -663,7 +667,7 @@ pub async fn export_table_csv(
                 drop(writer);
                 drop(stream);
                 temp_guard.cleanup_now().await;
-                let _ = client.batch_execute("ROLLBACK;").await;
+                rollback_with_timeout(&client).await;
                 return Err(LucidError::QueryCancelled);
             }
             item = stream.next() => item,
@@ -679,7 +683,7 @@ pub async fn export_table_csv(
                 drop(writer);
                 drop(stream);
                 temp_guard.cleanup_now().await;
-                let _ = client.batch_execute("ROLLBACK;").await;
+                rollback_with_timeout(&client).await;
                 return Err(map_postgres_error(e));
             }
         };
@@ -693,7 +697,7 @@ pub async fn export_table_csv(
             drop(writer);
             drop(stream);
             temp_guard.cleanup_now().await;
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(err);
         }
 
@@ -701,7 +705,7 @@ pub async fn export_table_csv(
             drop(writer);
             drop(stream);
             temp_guard.cleanup_now().await;
-            let _ = client.batch_execute("ROLLBACK;").await;
+            rollback_with_timeout(&client).await;
             return Err(LucidError::DatabaseError {
                 code: "58030".into(),
                 message: format!("Failed writing CSV row: {}", e),
@@ -724,18 +728,18 @@ pub async fn export_table_csv(
     if run_state.is_cancelled.load(Ordering::Acquire) {
         drop(writer);
         temp_guard.cleanup_now().await;
-        let _ = client.batch_execute("ROLLBACK;").await;
+        rollback_with_timeout(&client).await;
         return Err(LucidError::QueryCancelled);
     }
 
     if let Err(err) = finalize_temp_file(writer, &temp_path, &dest_path).await {
         temp_guard.cleanup_now().await;
-        let _ = client.batch_execute("ROLLBACK;").await;
+        rollback_with_timeout(&client).await;
         return Err(err);
     }
 
     temp_guard.disarm();
-    let _ = client.batch_execute("ROLLBACK;").await;
+    rollback_with_timeout(&client).await;
 
     Ok(CsvExportResult {
         destination_path: dest_path.to_string_lossy().into_owned(),
@@ -744,6 +748,10 @@ pub async fn export_table_csv(
         execution_duration_ms: start.elapsed().as_millis() as u64,
         snapshot_isolation: Some("REPEATABLE READ READ ONLY".to_string()),
     })
+}
+
+async fn rollback_with_timeout(client: &deadpool_postgres::Client) {
+    let _ = tokio::time::timeout(Duration::from_millis(1500), client.batch_execute("ROLLBACK;")).await;
 }
 
 pub fn get_export_progress(export_id: String) -> Option<ExportProgress> {
@@ -786,6 +794,7 @@ mod tests {
             user,
             password: None,
             ssl_mode: "disable".into(),
+            ssl_root_cert: None,
             timeout_seconds: 5,
         }
     }

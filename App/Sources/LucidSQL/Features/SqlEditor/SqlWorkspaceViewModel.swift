@@ -20,6 +20,7 @@ public final class SqlWorkspaceViewModel {
     public var onReadOnlyChanged: ((Bool) -> Void)? = nil
 
     public let draftStore: SqlDraftStore
+    public let privacyPreferences: PrivacyPreferencesStore
     private var pendingSaveTask: Task<Void, Never>? = nil
 
     public var activeTab: SqlEditorViewModel? {
@@ -41,8 +42,12 @@ public final class SqlWorkspaceViewModel {
         tabs.filter(\.hasActiveSession).count
     }
 
-    public init(draftStore: SqlDraftStore = SqlDraftStore()) {
+    public init(
+        draftStore: SqlDraftStore = SqlDraftStore(),
+        privacyPreferences: PrivacyPreferencesStore? = nil
+    ) {
         self.draftStore = draftStore
+        self.privacyPreferences = privacyPreferences ?? PrivacyPreferencesStore.shared
     }
 
     public func activateSingleTab(_ tab: SqlEditorViewModel) {
@@ -61,7 +66,9 @@ public final class SqlWorkspaceViewModel {
         self.showingCloseTabConfirmation = false
         self.renamingTabID = nil
 
-        if let snapshot = draftStore.loadWorkspace(for: profileId), !snapshot.tabs.isEmpty {
+        if privacyPreferences.isSqlDraftPersistenceEnabled,
+           let snapshot = draftStore.loadWorkspace(for: profileId),
+           !snapshot.tabs.isEmpty {
             let restoredTabs = snapshot.tabs.map { draft -> SqlEditorViewModel in
                 let vm = SqlEditorViewModel(
                     id: draft.id,
@@ -221,9 +228,27 @@ public final class SqlWorkspaceViewModel {
         renamingTabID = nil
     }
 
+    public func setDraftPersistenceEnabled(_ enabled: Bool) throws {
+        privacyPreferences.setSqlDraftPersistenceEnabled(enabled)
+        if enabled {
+            flushDrafts()
+        } else {
+            pendingSaveTask?.cancel()
+            pendingSaveTask = nil
+            try draftStore.deleteAllWorkspaces()
+        }
+    }
+
+    public func clearSavedDrafts() throws {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        try draftStore.deleteAllWorkspaces()
+    }
+
     public func flushDrafts() {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil
+        guard privacyPreferences.isSqlDraftPersistenceEnabled else { return }
         guard let profileId = currentProfileId, !tabs.isEmpty else { return }
         let snapshot = ProfileSqlWorkspaceSnapshot(
             profileId: profileId,
@@ -243,6 +268,11 @@ public final class SqlWorkspaceViewModel {
     }
 
     private func scheduleSave() {
+        guard privacyPreferences.isSqlDraftPersistenceEnabled else {
+            pendingSaveTask?.cancel()
+            pendingSaveTask = nil
+            return
+        }
         pendingSaveTask?.cancel()
         pendingSaveTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 200_000_000)

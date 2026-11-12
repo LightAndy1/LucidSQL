@@ -14,6 +14,7 @@ struct SqlEditorWorkflowTests {
             user: user,
             password: nil,
             sslMode: "disable",
+            sslRootCert: nil,
             timeoutSeconds: 5
         )
     }

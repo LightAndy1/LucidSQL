@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::pin_mut;
 use futures_util::StreamExt;
 use tokio_postgres::{CancelToken, Client};
 
+use crate::connection::tls::CancelTlsTarget;
 use crate::connection::TransactionStatus;
 use crate::error::LucidError;
 use crate::query::value_mapper::map_cell_value;
@@ -23,12 +24,20 @@ pub struct QueryResult {
     pub transaction_status: TransactionStatus,
 }
 
-static CANCELLATION_REGISTRY: LazyLock<RwLock<HashMap<String, CancelToken>>> =
+static CANCELLATION_REGISTRY: LazyLock<RwLock<HashMap<String, (CancelToken, CancelTlsTarget)>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub fn register_cancel_token(query_id: &str, token: CancelToken) {
+    register_cancel_token_with_tls(query_id, token, CancelTlsTarget::disable());
+}
+
+pub fn register_cancel_token_with_tls(
+    query_id: &str,
+    token: CancelToken,
+    tls_target: CancelTlsTarget,
+) {
     if let Ok(mut reg) = CANCELLATION_REGISTRY.write() {
-        reg.insert(query_id.to_string(), token);
+        reg.insert(query_id.to_string(), (token, tls_target));
     }
 }
 
@@ -39,7 +48,7 @@ pub fn unregister_cancel_token(query_id: &str) {
 }
 
 pub async fn cancel_active_query(query_id: &str) -> Result<bool, LucidError> {
-    let token = {
+    let target = {
         let reg = CANCELLATION_REGISTRY
             .read()
             .map_err(|e| LucidError::DatabaseError {
@@ -50,26 +59,10 @@ pub async fn cancel_active_query(query_id: &str) -> Result<bool, LucidError> {
         reg.get(query_id).cloned()
     };
 
-    if let Some(token) = token {
-        // Send cancel request out-of-band to PostgreSQL
-        let res = token.cancel_query(tokio_postgres::NoTls).await;
-        match res {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                // If the connection was already closed or the query already completed,
-                // cancel_query might report an error, which is safe to treat as not-cancelled.
-                let msg = e.to_string();
-                if msg.contains("broken pipe") || msg.contains("connection refused") {
-                    Ok(false)
-                } else {
-                    Err(LucidError::DatabaseError {
-                        code: "57014".into(),
-                        message: format!("Failed to send query cancellation packet: {}", e),
-                        detail: None,
-                    })
-                }
-            }
-        }
+    if let Some((token, tls_target)) = target {
+        tls_target
+            .cancel_with_timeout(&token, Duration::from_secs(2))
+            .await
     } else {
         Ok(false)
     }

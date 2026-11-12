@@ -62,7 +62,7 @@ public struct CsvExportSheetView: View {
                     Picker("Export Scope", selection: $viewModel.tableScope) {
                         Text("Current Fetched Page (\(fetchedRows.count) rows, from #\(offset + 1))")
                             .tag(TableExportScope.currentPage)
-                        Text("All Rows Matching Current Order/Filters")
+                        Text("All Rows in Table")
                             .tag(TableExportScope.allRows)
                     }
                     .pickerStyle(.radioGroup)
@@ -99,7 +99,7 @@ public struct CsvExportSheetView: View {
             if !unsupportedCols.isEmpty {
                 warningBox(
                     title: "Unsupported Column Type(s) in Fetched Result",
-                    message: "Cannot export placeholder text for: \(unsupportedCols.joined(separator: ", ")). \(viewModel.isSqlTarget ? "Cast those columns with ::text in SQL to export their PostgreSQL text representations." : "Switch scope to \"All Rows Matching Current Order/Filters\" so PostgreSQL streams their canonical ::text representations.")"
+                    message: "Cannot export placeholder text for: \(unsupportedCols.joined(separator: ", ")). \(viewModel.isSqlTarget ? "Cast those columns with ::text in SQL to export their PostgreSQL text representations." : "Switch scope to \"All Rows in Table\" so PostgreSQL streams their canonical ::text representations.")"
                 )
             }
 
@@ -108,9 +108,10 @@ public struct CsvExportSheetView: View {
                 Text("CSV & NULL Semantics")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("RFC 4180 UTF-8 CSV (commas/quotes/newlines properly quoted). SQL NULL = unquoted empty field (e.g. a,,b); non-null empty string = quoted empty field (a,\"\",b). Exact decimals and timestamps are preserved without float rounding.")
+                Text("RFC 4180 UTF-8 CSV (commas/quotes/newlines properly quoted). SQL NULL = unquoted empty field (e.g. a,,b); non-null empty string = quoted empty field (a,\"\",b). Distinguishing NULL from \"\" on import requires a CSV importer that preserves quoting conventions (not universal across spreadsheet tools). Text cells beginning with =, +, -, or @ are exported verbatim without altering database values—exercise care before opening untrusted CSV data in spreadsheets that evaluate formulas.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)

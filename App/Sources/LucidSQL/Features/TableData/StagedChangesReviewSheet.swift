@@ -253,6 +253,31 @@ public struct StagedChangesReviewSheet: View {
             .padding(8)
             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
 
+            if viewModel.hasUncertainCommitOutcome {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .foregroundStyle(.orange)
+                        .font(.system(size: 13))
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Commit Outcome Uncertain — Blind Re-Apply Blocked")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        Text("The COMMIT request lost contact with PostgreSQL before a final confirmation arrived. The transaction may have committed or rolled back on the server. Click \"Reload & Reconcile\" to inspect live rows before re-entering any edits.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
+                )
+            }
+
             if let error = viewModel.errorMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -286,7 +311,18 @@ public struct StagedChangesReviewSheet: View {
                 .controlSize(.regular)
                 .disabled(viewModel.isApplying)
 
-                if viewModel.errorMessage != nil {
+                if viewModel.hasUncertainCommitOutcome {
+                    Button("Reload & Reconcile") {
+                        Task {
+                            await viewModel.reconcileUncertainCommit(config: config)
+                            dismiss()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.regular)
+                    .disabled(viewModel.isApplying)
+                } else if viewModel.errorMessage != nil {
                     Button("Discard & Reload") {
                         Task {
                             await viewModel.discardAndReload(config: config)
@@ -320,7 +356,12 @@ public struct StagedChangesReviewSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.isApplying || !viewModel.hasPendingChanges || !validationIssues.isEmpty)
+                .disabled(
+                    viewModel.isApplying
+                        || !viewModel.hasPendingChanges
+                        || !validationIssues.isEmpty
+                        || viewModel.hasUncertainCommitOutcome
+                )
             }
         }
         .padding(20)

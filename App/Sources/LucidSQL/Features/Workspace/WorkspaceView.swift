@@ -17,12 +17,18 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var currentMode: WorkspaceMode = .sqlEditor
     @Published public var showingDisconnectSessionWarning: Bool = false
     @Published public var disconnectWarningMessage: String = ""
+    @Published public var showingTableNavigationAlert: Bool = false
+    @Published public var tableNavigationWarningMessage: String = ""
+    @Published public var isShowingSettingsSheet: Bool = false
 
     public var tableViewModel = TableDataViewModel()
     public let sqlWorkspace: SqlWorkspaceViewModel
     public let profileStore: ConnectionProfileStore
+    public let privacyPreferences: PrivacyPreferencesStore
+    public var sweepGlobalSessionsOnDisconnect: Bool = true
 
     private var terminateObserver: NSObjectProtocol? = nil
+    private var pendingTableNavigationAction: (() -> Void)? = nil
 
     public var sqlEditorViewModel: SqlEditorViewModel {
         sqlWorkspace.activeTab ?? SqlEditorViewModel()
@@ -30,10 +36,16 @@ public final class WorkspaceModel: ObservableObject {
 
     public init(
         profileStore: ConnectionProfileStore = ConnectionProfileStore(),
-        draftStore: SqlDraftStore = SqlDraftStore()
+        draftStore: SqlDraftStore = SqlDraftStore(),
+        privacyPreferences: PrivacyPreferencesStore? = nil
     ) {
+        let resolvedPrivacy = privacyPreferences ?? PrivacyPreferencesStore.shared
         self.profileStore = profileStore
-        self.sqlWorkspace = SqlWorkspaceViewModel(draftStore: draftStore)
+        self.privacyPreferences = resolvedPrivacy
+        self.sqlWorkspace = SqlWorkspaceViewModel(
+            draftStore: draftStore,
+            privacyPreferences: resolvedPrivacy
+        )
         bindReadOnlySync()
         registerTerminateObserver()
     }
@@ -92,9 +104,83 @@ public final class WorkspaceModel: ObservableObject {
         self.sqlWorkspace.createTab()
     }
 
+    public struct LifecycleSummary: Sendable, Equatable {
+        public let pendingTableChangesCount: Int
+        public let pendingTableSummary: String
+        public let currentTableName: String
+        public let hasUncertainCommitOutcome: Bool
+        public let activeSqlTabDetails: [String]
+        public let activeExportsCount: Int
+
+        public var isEmpty: Bool {
+            pendingTableChangesCount == 0
+                && !hasUncertainCommitOutcome
+                && activeSqlTabDetails.isEmpty
+                && activeExportsCount == 0
+        }
+    }
+
+    public var activeExportViewModels: [CsvExportViewModel] {
+        var exports: [CsvExportViewModel] = []
+        if let tableExport = tableViewModel.exportViewModel, tableExport.isExporting {
+            exports.append(tableExport)
+        }
+        for tab in sqlWorkspace.tabs {
+            if let sqlExport = tab.exportViewModel, sqlExport.isExporting {
+                exports.append(sqlExport)
+            }
+        }
+        return exports
+    }
+
+    public var lifecycleSummary: LifecycleSummary {
+        let activeTabDetails: [String] = sqlWorkspace.tabsWithActiveWork.map { tab in
+            var parts: [String] = []
+            if tab.isRunning { parts.append("query running") }
+            if tab.transactionStatus == .inTransaction { parts.append("uncommitted transaction") }
+            if tab.transactionStatus == .failedTransaction { parts.append("aborted transaction") }
+            return "• \(tab.title) (\(parts.joined(separator: ", ")))"
+        }
+
+        return LifecycleSummary(
+            pendingTableChangesCount: tableViewModel.totalStagedOperationsCount,
+            pendingTableSummary: tableViewModel.stagedSummaryText,
+            currentTableName: tableViewModel.currentTable,
+            hasUncertainCommitOutcome: tableViewModel.hasUncertainCommitOutcome,
+            activeSqlTabDetails: activeTabDetails,
+            activeExportsCount: activeExportViewModels.count
+        )
+    }
+
+    public func formattedLifecycleWarning(actionVerb: String) -> String {
+        let summary = lifecycleSummary
+        var sections: [String] = []
+
+        if summary.hasUncertainCommitOutcome {
+            sections.append("• Uncertain mutation commit on '\(summary.currentTableName)' has not been reconciled yet (recommended: Reload & Reconcile before leaving).")
+        } else if summary.pendingTableChangesCount > 0 {
+            let tableName = summary.currentTableName.isEmpty ? "Table Data" : summary.currentTableName
+            sections.append("• \(summary.pendingTableChangesCount) staged change(s) (\(summary.pendingTableSummary)) in '\(tableName)' will be discarded.")
+        }
+
+        if summary.activeExportsCount > 0 {
+            sections.append("• \(summary.activeExportsCount) CSV export\(summary.activeExportsCount == 1 ? "" : "s") currently streaming will be cancelled and temporary output discarded.")
+        }
+
+        if !summary.activeSqlTabDetails.isEmpty {
+            sections.append("• SQL tabs with active work (queries cancelled, transactions rolled back):\n" + summary.activeSqlTabDetails.joined(separator: "\n"))
+        }
+
+        let draftNote = privacyPreferences.isSqlDraftPersistenceEnabled
+            ? "Saved SQL drafts remain on disk for this profile, while temporary tables and session settings will be lost."
+            : "SQL draft saving is disabled: SQL text in memory will not be persisted to disk, and temporary tables/session settings will be lost."
+
+        return "Continuing to \(actionVerb) will affect:\n\n\(sections.joined(separator: "\n\n"))\n\n\(draftNote)"
+    }
+
     public func loadTable(schema: String, table: String) async {
         guard let config = activeConfig else { return }
-        tableViewModel.safeNavigate { [weak self] in
+        let navigate = { [weak self] in
             guard let self = self else { return }
             self.selectedTable = "\(schema).\(table)"
             self.currentMode = .tableData
@@ -102,37 +188,86 @@ public final class WorkspaceModel: ObservableObject {
                 await self.tableViewModel.loadTable(config: config, schema: schema, table: table)
             }
         }
+
+        if tableViewModel.hasPendingChanges || tableViewModel.hasUncertainCommitOutcome {
+            pendingTableNavigationAction = navigate
+            let tableName = tableViewModel.currentTable.isEmpty ? "the current table" : tableViewModel.currentTable
+            if tableViewModel.hasUncertainCommitOutcome {
+                tableNavigationWarningMessage =
+                    "The last commit on '\(tableName)' had an uncertain outcome and has not been reconciled yet. Discard staged items and load '\(schema).\(table)', or cancel to reconcile first?"
+            } else {
+                tableNavigationWarningMessage =
+                    "You have \(tableViewModel.totalStagedOperationsCount) unsaved change(s) (\(tableViewModel.stagedSummaryText)) in '\(tableName)'. Discard them and load '\(schema).\(table)'?"
+            }
+            showingTableNavigationAlert = true
+        } else {
+            navigate()
+        }
+    }
+
+    public func confirmTableNavigation() {
+        tableViewModel.discardChanges()
+        showingTableNavigationAlert = false
+        tableNavigationWarningMessage = ""
+        let action = pendingTableNavigationAction
+        pendingTableNavigationAction = nil
+        action?()
+    }
+
+    public func cancelTableNavigation() {
+        showingTableNavigationAlert = false
+        tableNavigationWarningMessage = ""
+        pendingTableNavigationAction = nil
     }
 
     public func disconnect() {
-        tableViewModel.safeNavigate { [weak self] in
-            guard let self = self else { return }
-            let activeTabs = self.sqlWorkspace.tabsWithActiveWork
-            if !activeTabs.isEmpty {
-                let details = activeTabs.map { tab in
-                    var parts: [String] = []
-                    if tab.isRunning { parts.append("query running") }
-                    if tab.transactionStatus == .inTransaction { parts.append("uncommitted transaction") }
-                    if tab.transactionStatus == .failedTransaction { parts.append("aborted transaction") }
-                    return "• \(tab.title) (\(parts.joined(separator: ", ")))"
-                }.joined(separator: "\n")
-                self.disconnectWarningMessage =
-                    "The following SQL tabs have active work that will be cancelled or rolled back on disconnect:\n\n\(details)\n\nSQL drafts will remain saved for this profile, but temporary tables and session settings will be lost."
-                self.showingDisconnectSessionWarning = true
-            } else {
-                Task { @MainActor in
-                    await self.performConfirmedDisconnect()
+        let summary = lifecycleSummary
+        if !summary.isEmpty {
+            disconnectWarningMessage = formattedLifecycleWarning(actionVerb: "disconnect")
+            showingDisconnectSessionWarning = true
+        } else {
+            Task { @MainActor in
+                await self.performConfirmedDisconnect()
+            }
+        }
+    }
+
+    public func performBoundedTeardown(timeoutSeconds: Double = 2.5) async {
+        sqlWorkspace.flushDrafts()
+        let activeExports = activeExportViewModels
+        let sqlWorkspaceRef = sqlWorkspace
+        let shouldSweepGlobal = sweepGlobalSessionsOnDisconnect
+
+        let timeoutNs = UInt64(max(0.1, timeoutSeconds) * 1_000_000_000)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                for exportVM in activeExports {
+                    await exportVM.cancelAndWait(timeoutSeconds: timeoutSeconds)
+                }
+                await sqlWorkspaceRef.closeAllSessionsOnDisconnect()
+                if shouldSweepGlobal {
+                    try? await close_all_sessions()
                 }
             }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNs)
+            }
+            _ = await group.next()
+            group.cancelAll()
         }
     }
 
     public func performConfirmedDisconnect() async {
         showingDisconnectSessionWarning = false
         disconnectWarningMessage = ""
+        showingTableNavigationAlert = false
+        tableNavigationWarningMessage = ""
+        pendingTableNavigationAction = nil
+
         let currentReadOnly = sqlWorkspace.defaultReadOnly
-        await sqlWorkspace.closeAllSessionsOnDisconnect()
-        try? await close_all_sessions()
+        tableViewModel.discardChanges()
+        await performBoundedTeardown(timeoutSeconds: 2.5)
+
         self.activeProfile = nil
         self.activeConfig = nil
         self.selectedTable = ""
@@ -345,24 +480,33 @@ public struct WorkspaceView: View {
             }
 
             ToolbarItem(placement: .primaryAction) {
-                if model.activeConfig != nil {
-                    SecondaryActionButton(
-                        title: "Disconnect",
-                        icon: "eject.fill",
-                        size: .regular
-                    ) {
-                        model.disconnect()
+                HStack(spacing: 8) {
+                    Button {
+                        model.isShowingSettingsSheet = true
+                    } label: {
+                        Image(systemName: "gearshape")
                     }
-                    .help("Disconnect from Database")
-                } else {
-                    PrimaryActionButton(
-                        title: "Connect",
-                        icon: "cable.connector",
-                        size: .regular
-                    ) {
-                        model.isShowingConnectionSheet = true
+                    .help("Settings & Draft Privacy (⌘,)")
+
+                    if model.activeConfig != nil {
+                        SecondaryActionButton(
+                            title: "Disconnect",
+                            icon: "eject.fill",
+                            size: .regular
+                        ) {
+                            model.disconnect()
+                        }
+                        .help("Disconnect from Database")
+                    } else {
+                        PrimaryActionButton(
+                            title: "Connect",
+                            icon: "cable.connector",
+                            size: .regular
+                        ) {
+                            model.isShowingConnectionSheet = true
+                        }
+                        .help("Connect to PostgreSQL (⌘N)")
                     }
-                    .help("Connect to PostgreSQL (⌘N)")
                 }
             }
         }
@@ -374,8 +518,24 @@ public struct WorkspaceView: View {
                 model.connect(profile: profile, password: password)
             }
         }
-        .alert("Active SQL Sessions", isPresented: $model.showingDisconnectSessionWarning) {
-            Button("Disconnect & Rollback", role: .destructive) {
+        .sheet(isPresented: $model.isShowingSettingsSheet) {
+            PrivacySettingsView(
+                workspaceModel: model,
+                preferences: model.privacyPreferences
+            )
+        }
+        .alert("Discard Unsaved Changes?", isPresented: $model.showingTableNavigationAlert) {
+            Button("Discard & Switch Table", role: .destructive) {
+                model.confirmTableNavigation()
+            }
+            Button("Cancel", role: .cancel) {
+                model.cancelTableNavigation()
+            }
+        } message: {
+            Text(model.tableNavigationWarningMessage)
+        }
+        .alert("Confirm Disconnect", isPresented: $model.showingDisconnectSessionWarning) {
+            Button("Disconnect & Clean Up", role: .destructive) {
                 Task { @MainActor in
                     await model.performConfirmedDisconnect()
                 }

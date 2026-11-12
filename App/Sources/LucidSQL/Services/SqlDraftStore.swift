@@ -90,6 +90,14 @@ public final class SqlDraftStore: @unchecked Sendable {
         }
     }
 
+    public func deleteAllWorkspaces() throws {
+        try queue.sync {
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
+        }
+    }
+
     public func pruneOrphanedWorkspaces(validProfileIds: Set<UUID>) throws {
         try queue.sync {
             var catalog = loadCatalogLocked()

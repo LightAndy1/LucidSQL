@@ -17,7 +17,12 @@ required-features = ["uniffi/cli"]
 uniffi = { version = "0.28", features = ["tokio", "build", "cli"] }
 tokio = { version = "1.38", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-postgres-rustls = { version = "0.14", features = ["ring", "native-certs"] }
 deadpool-postgres = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.10"
 thiserror = "1.0"
 uuid = { version = "1.8", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

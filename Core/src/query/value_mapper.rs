@@ -462,6 +462,7 @@ mod tests {
             user,
             password: None,
             ssl_mode: "disable".into(),
+            ssl_root_cert: None,
             timeout_seconds: 5,
         }
     }
