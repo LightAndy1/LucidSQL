@@ -28,6 +28,9 @@ public final class TableDataViewModel: @unchecked Sendable {
     public var showingReviewSheet: Bool = false
     public var showingUnsavedChangesAlert: Bool = false
     public var pendingNavigationAction: (() -> Void)? = nil
+    public var sortColumn: String? = nil
+    public var sortDescending: Bool = false
+    public var exportViewModel: CsvExportViewModel? = nil
 
     public struct GridCoordinate: Hashable, Sendable {
         public let row: Int
@@ -394,6 +397,8 @@ public final class TableDataViewModel: @unchecked Sendable {
         self.currentSchema = schema
         self.currentTable = table
         self.offset = 0
+        self.sortColumn = nil
+        self.sortDescending = false
         self.clearStagedChanges()
         self.statusMessage = nil
         await fetchPage(config: config)
@@ -411,7 +416,9 @@ public final class TableDataViewModel: @unchecked Sendable {
                 schema: currentSchema,
                 table: currentTable,
                 offset: offset,
-                limit: limit
+                limit: limit,
+                sortCol: sortColumn,
+                sortDesc: sortDescending
             )
 
             self.columns = cols
@@ -428,6 +435,32 @@ public final class TableDataViewModel: @unchecked Sendable {
 
     public func notifyRowsUpdated() {
         dataVersion &+= 1
+    }
+
+    @MainActor
+    public func prepareCsvExport(
+        config: ConnectionConfig,
+        initialScope: TableExportScope = .currentPage
+    ) -> CsvExportViewModel? {
+        guard !currentTable.isEmpty, !columns.isEmpty else { return nil }
+        let vm = CsvExportViewModel(
+            target: .tableData(
+                config: config,
+                schema: currentSchema,
+                table: currentTable,
+                columns: columns,
+                fetchedRows: rows,
+                offset: offset,
+                hasPrimaryKey: hasPrimaryKey,
+                sortCol: sortColumn,
+                sortDesc: sortDescending,
+                pendingChangesCount: totalStagedOperationsCount,
+                stagedSummary: stagedSummaryText
+            ),
+            initialTableScope: initialScope
+        )
+        self.exportViewModel = vm
+        return vm
     }
 
     public func nextPage(config: ConnectionConfig) {

@@ -196,6 +196,22 @@ public struct TableDataContainerView: View {
                         .padding(.trailing, 4)
                 }
 
+                Button {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    _ = viewModel.prepareCsvExport(config: config)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Export CSV")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.columns.isEmpty || viewModel.isLoading)
+                .help("Export current page or full table data to CSV")
+
                 // Compact Pagination Controls
                 HStack(spacing: 5) {
                     Button {
@@ -381,6 +397,9 @@ public struct TableDataContainerView: View {
         }
         .sheet(isPresented: $viewModel.showingReviewSheet) {
             StagedChangesReviewSheet(viewModel: viewModel, config: config)
+        }
+        .sheet(item: $viewModel.exportViewModel) { exportVM in
+            CsvExportSheetView(viewModel: exportVM)
         }
         .alert("Unsaved Changes", isPresented: $viewModel.showingUnsavedChangesAlert) {
             Button("Discard Changes", role: .destructive) {

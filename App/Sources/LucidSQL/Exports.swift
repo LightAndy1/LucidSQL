@@ -16,6 +16,9 @@ extension RowDelete: @unchecked Sendable {}
 extension InsertedRowResult: @unchecked Sendable {}
 extension BatchMutationRequest: @unchecked Sendable {}
 extension BatchMutationResult: @unchecked Sendable {}
+extension CsvExportResult: @unchecked Sendable {}
+extension ExportProgress: @unchecked Sendable {}
+extension TableCsvExportRequest: @unchecked Sendable {}
 
 // Provide snake_case aliases matching Rust/plan spec
 public func bridge_ping() -> String {
@@ -119,4 +122,40 @@ public func apply_table_mutations(
     readOnly: Bool = false
 ) async throws -> BatchMutationResult {
     try await applyTableMutations(config: config, request: request, readOnly: readOnly)
+}
+
+public func export_fetched_rows_csv(
+    columns: [ColumnMetadata],
+    rows: [RowData],
+    destinationPath: String,
+    excludeLeadingXmin: Bool
+) async throws -> CsvExportResult {
+    try await exportFetchedRowsCsv(
+        columns: columns,
+        rows: rows,
+        destinationPath: destinationPath,
+        excludeLeadingXmin: excludeLeadingXmin
+    )
+}
+
+public func export_table_csv(
+    config: ConnectionConfig,
+    request: TableCsvExportRequest,
+    destinationPath: String,
+    exportId: String
+) async throws -> CsvExportResult {
+    try await exportTableCsv(
+        config: config,
+        request: request,
+        destinationPath: destinationPath,
+        exportId: exportId
+    )
+}
+
+public func get_export_progress(exportId: String) -> ExportProgress? {
+    getExportProgress(exportId: exportId)
+}
+
+public func cancel_export(exportId: String) async throws -> Bool {
+    try await cancelExport(exportId: exportId)
 }

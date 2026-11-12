@@ -5,12 +5,14 @@ uniffi::setup_scaffolding!();
 
 pub mod connection;
 pub mod error;
+pub mod export;
 pub mod mutation;
 pub mod query;
 pub mod schema;
 
 pub use connection::{ConnectionConfig, SessionInfo, TransactionStatus};
 pub use error::LucidError;
+pub use export::{CsvExportResult, ExportProgress, TableCsvExportRequest};
 pub use mutation::{
     BatchMutationRequest, BatchMutationResult, InsertedRowResult, RowDelete, RowInsert, RowMutation,
 };
@@ -330,6 +332,67 @@ pub async fn cancel_query(query_id: String) -> Result<bool, LucidError> {
         .spawn(async move {
             query::cancel_active_query(&query_id).await
         })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn export_fetched_rows_csv(
+    columns: Vec<ColumnMetadata>,
+    rows: Vec<RowData>,
+    destination_path: String,
+    exclude_leading_xmin: bool,
+) -> Result<CsvExportResult, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            export::export_fetched_rows_csv(
+                columns,
+                rows,
+                destination_path,
+                exclude_leading_xmin,
+            )
+            .await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn export_table_csv(
+    config: ConnectionConfig,
+    request: TableCsvExportRequest,
+    destination_path: String,
+    export_id: String,
+) -> Result<CsvExportResult, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            export::export_table_csv(config, request, destination_path, export_id).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub fn get_export_progress(export_id: String) -> Option<ExportProgress> {
+    export::get_export_progress(export_id)
+}
+
+#[uniffi::export]
+pub async fn cancel_export(export_id: String) -> Result<bool, LucidError> {
+    get_runtime()
+        .spawn(async move { export::cancel_export(export_id).await })
         .await
         .map_err(|e| LucidError::DatabaseError {
             code: "58000".into(),

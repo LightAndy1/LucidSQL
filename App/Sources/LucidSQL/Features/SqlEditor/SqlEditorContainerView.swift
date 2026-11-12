@@ -513,7 +513,7 @@ private struct SqlTabContentView: View {
                                     .foregroundStyle(.secondary)
 
                                 if result.isTruncated {
-                                    Text("LIMIT REACHED")
+                                    Text("LIMIT REACHED (PARTIAL)")
                                         .font(.system(size: 9, weight: .bold))
                                         .foregroundStyle(.orange)
                                         .padding(.horizontal, 5)
@@ -526,6 +526,15 @@ private struct SqlTabContentView: View {
                                 Text("\(result.columns.count) columns")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.tertiary)
+
+                                SecondaryActionButton(
+                                    title: "Export Fetched CSV...",
+                                    icon: "square.and.arrow.up",
+                                    size: .small
+                                ) {
+                                    _ = viewModel.prepareFetchedResultsExport()
+                                }
+                                .help("Export the currently fetched SQL result rows to CSV")
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
@@ -565,6 +574,9 @@ private struct SqlTabContentView: View {
                 }
             }
             .frame(minHeight: 180)
+        }
+        .sheet(item: $viewModel.exportViewModel) { exportVM in
+            CsvExportSheetView(viewModel: exportVM)
         }
     }
 

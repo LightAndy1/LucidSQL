@@ -78,7 +78,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (id serial PRIMARY KEY, title text, price numeric(12, 4), note text);
         INSERT INTO \(tableName) (title, price, note) VALUES ('Notebook', 12.5000, 'initial');
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -108,13 +108,13 @@ struct TableDataViewModelTests {
 
         // Verify DB value
         let verifySql = "SELECT price::text, note FROM \(tableName) WHERE id = 1;"
-        let res = try await execute_session_query(config: config, sessionId: "verify", sql: verifySql, queryId: UUID().uuidString)
+        let res = try await execute_query(config: config, sql: verifySql, queryId: UUID().uuidString)
         #expect(res.rows.count == 1)
         #expect(res.rows[0].cells[0] == .text("14.9950"))
         #expect(res.rows[0].cells[1] == .null)
 
         // Cleanup
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify composite primary key editing and parameterization")
@@ -127,7 +127,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (dept_id int, emp_id int, name text, active bool, PRIMARY KEY (dept_id, emp_id));
         INSERT INTO \(tableName) VALUES (1, 101, 'Carol', false);
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -146,12 +146,12 @@ struct TableDataViewModelTests {
 
         // Verify in DB
         let verifySql = "SELECT name, active FROM \(tableName) WHERE dept_id = 1 AND emp_id = 101;"
-        let res = try await execute_session_query(config: config, sessionId: "verify", sql: verifySql, queryId: UUID().uuidString)
+        let res = try await execute_query(config: config, sql: verifySql, queryId: UUID().uuidString)
         #expect(res.rows.count == 1)
         #expect(res.rows[0].cells[0] == .text("Carol Danvers"))
         #expect(res.rows[0].cells[1] == .boolean(true))
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify distinction between NULL and empty string")
@@ -164,7 +164,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (id int PRIMARY KEY, col_null text, col_empty text);
         INSERT INTO \(tableName) VALUES (1, 'initial_a', 'initial_b');
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -181,13 +181,13 @@ struct TableDataViewModelTests {
 
         // Check DB
         let verifySql = "SELECT col_null, col_empty, (col_null IS NULL) as is_null, (col_empty = '') as is_empty FROM \(tableName) WHERE id = 1;"
-        let res = try await execute_session_query(config: config, sessionId: "verify", sql: verifySql, queryId: UUID().uuidString)
+        let res = try await execute_query(config: config, sql: verifySql, queryId: UUID().uuidString)
         #expect(res.rows[0].cells[0] == .null)
         #expect(res.rows[0].cells[1] == .text(""))
         #expect(res.rows[0].cells[2] == .boolean(true))
         #expect(res.rows[0].cells[3] == .boolean(true))
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify concurrent modification conflict detection with xmin rollback")
@@ -200,7 +200,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (id int PRIMARY KEY, count int);
         INSERT INTO \(tableName) VALUES (1, 100);
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -209,9 +209,8 @@ struct TableDataViewModelTests {
         vm.stageTextEdit(row: 0, column: 1, text: "150")
 
         // Concurrent update in background advancing row xmin
-        _ = try await execute_session_query(
+        _ = try await execute_query(
             config: config,
-            sessionId: "concurrent_updater",
             sql: "UPDATE \(tableName) SET count = 200 WHERE id = 1;",
             queryId: UUID().uuidString
         )
@@ -224,10 +223,10 @@ struct TableDataViewModelTests {
         #expect(!vm.stagedEdits.isEmpty)
 
         // Verify DB still holds concurrent value 200 (not overwritten)
-        let checkRes = try await execute_session_query(config: config, sessionId: "check", sql: "SELECT count FROM \(tableName) WHERE id = 1;", queryId: UUID().uuidString)
+        let checkRes = try await execute_query(config: config, sql: "SELECT count FROM \(tableName) WHERE id = 1;", queryId: UUID().uuidString)
         #expect(checkRes.rows[0].cells[0] == .integer(200))
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify atomic batch rollback when one row update fails")
@@ -240,7 +239,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (id int PRIMARY KEY, score int CHECK (score >= 0));
         INSERT INTO \(tableName) VALUES (1, 50), (2, 80);
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -254,11 +253,11 @@ struct TableDataViewModelTests {
         #expect(vm.errorMessage != nil)
 
         // Verify row 1 was NOT modified (atomic rollback preserved original 50)
-        let checkRes = try await execute_session_query(config: config, sessionId: "check", sql: "SELECT score FROM \(tableName) ORDER BY id;", queryId: UUID().uuidString)
+        let checkRes = try await execute_query(config: config, sql: "SELECT score FROM \(tableName) ORDER BY id;", queryId: UUID().uuidString)
         #expect(checkRes.rows[0].cells[0] == .integer(50))
         #expect(checkRes.rows[1].cells[0] == .integer(80))
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify read-only guardrail rejection in table mutation")
@@ -271,7 +270,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (id int PRIMARY KEY, name text);
         INSERT INTO \(tableName) VALUES (1, 'Initial');
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -285,7 +284,7 @@ struct TableDataViewModelTests {
         vm.stageTextEdit(row: 0, column: 1, text: "Attempted Edit")
         #expect(vm.stagedEdits.isEmpty) // Blocked by isEditable guard
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify unsupported table without primary key is read-only")
@@ -298,7 +297,7 @@ struct TableDataViewModelTests {
         CREATE TABLE \(tableName) (val text, num int);
         INSERT INTO \(tableName) VALUES ('a', 1);
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: "public", table: tableName)
@@ -308,7 +307,7 @@ struct TableDataViewModelTests {
         #expect(vm.nonEditableReason?.contains("no primary key") == true)
         #expect(vm.buildBatchMutationRequest() == nil)
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup", sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP TABLE \(tableName);", queryId: UUID().uuidString)
     }
 
     @Test("Verify system catalogs are read-only and pg_catalog.pg_am decodes without placeholders")
@@ -415,7 +414,7 @@ struct TableDataViewModelTests {
         );
         INSERT INTO \(schema).\(table) VALUES (10, 5001, 1234567890.0000123456, 'initial');
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup_\(schema)", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: schema, table: table)
@@ -436,11 +435,11 @@ struct TableDataViewModelTests {
         #expect(vm.originalCellValue(row: 0, column: 3) == .text(""))
 
         let verifySql = "SELECT amount::text, note FROM \(schema).\(table) WHERE tenant_id = 10 AND order_id = 5001;"
-        let res = try await execute_session_query(config: config, sessionId: "verify_\(schema)", sql: verifySql, queryId: UUID().uuidString)
+        let res = try await execute_query(config: config, sql: verifySql, queryId: UUID().uuidString)
         #expect(res.rows[0].cells[0] == .text("9999999999.1234500000"))
         #expect(res.rows[0].cells[1] == .text(""))
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup_\(schema)", sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
     }
 
     @Test("Verify DataTableCellView is non-editable and non-bezeled outside active editing")
@@ -655,7 +654,7 @@ struct TableDataViewModelTests {
         );
         INSERT INTO \(schema).\(table) (code, status, note) VALUES ('A1', 'active', 'seed1'), ('B2', 'active', 'seed2');
         """
-        _ = try await execute_session_query(config: config, sessionId: "setup_insdel", sql: setupSql, queryId: UUID().uuidString)
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
 
         let vm = TableDataViewModel()
         await vm.loadTable(config: config, schema: schema, table: table)
@@ -716,7 +715,7 @@ struct TableDataViewModelTests {
         #expect(vm.addDraftRow() == nil)
         #expect(vm.canDeleteRow(0) == false)
 
-        _ = try? await execute_session_query(config: config, sessionId: "cleanup_insdel", sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
+        _ = try? await execute_query(config: config, sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
     }
 
     @Test("Verify Coordinator Tab/Shift+Tab helper skips non-editable generated columns and pending-delete rows")

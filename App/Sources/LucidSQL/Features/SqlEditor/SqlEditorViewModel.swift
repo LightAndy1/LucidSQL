@@ -45,6 +45,7 @@ public final class SqlEditorViewModel: Identifiable, @unchecked Sendable {
 
     public var selectedSql: String? = nil
     public var maxRows: UInt32 = 1000
+    public var exportViewModel: CsvExportViewModel? = nil
 
     public var sessionId: String
     public var hasActiveSession: Bool = false
@@ -218,6 +219,24 @@ public final class SqlEditorViewModel: Identifiable, @unchecked Sendable {
     @MainActor
     public func rollback(config: ConnectionConfig) {
         executeQuery(config: config, selectionOnly: "ROLLBACK;")
+    }
+
+    @MainActor
+    public func prepareFetchedResultsExport() -> CsvExportViewModel? {
+        guard case .success(let result) = queryState, !result.columns.isEmpty else {
+            return nil
+        }
+        let vm = CsvExportViewModel(
+            target: .sqlResults(
+                tabTitle: title,
+                columns: result.columns,
+                rows: result.rows,
+                isTruncated: result.isTruncated,
+                maxRows: maxRows
+            )
+        )
+        self.exportViewModel = vm
+        return vm
     }
 
     @MainActor
