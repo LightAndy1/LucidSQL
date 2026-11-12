@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use deadpool_postgres::{Client, GenericClient};
+use deadpool_postgres::{Client, GenericClient, Transaction};
 use tokio_postgres::types::ToSql;
+use tokio_postgres::Row;
 
 use crate::error::LucidError;
-use crate::mutation::{BatchMutationRequest, BatchMutationResult};
+use crate::mutation::{
+    BatchMutationRequest, BatchMutationResult, InsertedRowResult, RowDelete, RowInsert, RowMutation,
+};
 use crate::query::execute::map_postgres_error;
-use crate::query::CellValue;
+use crate::query::value_mapper::map_cell_value;
+use crate::query::{CellValue, RowData};
 use crate::schema::is_system_schema;
 
 fn sanitize_identifier(ident: &str) -> String {
@@ -62,7 +66,10 @@ struct MutationColumnInfo {
     type_schema: String,
     type_name: String,
     is_primary_key: bool,
+    is_nullable: bool,
+    has_default: bool,
     is_generated: bool,
+    is_identity_always: bool,
 }
 
 async fn load_mutation_target<C: GenericClient>(
@@ -102,7 +109,10 @@ async fn load_mutation_target<C: GenericClient>(
                 tn.nspname AS type_schema,
                 t.typname AS type_name,
                 (pk.conkey IS NOT NULL AND a.attnum = ANY(pk.conkey)) AS is_pk,
-                COALESCE(a.attgenerated, '') != '' AS is_generated
+                NOT a.attnotnull AS is_nullable,
+                (a.atthasdef OR a.attidentity IN ('a', 'd') OR COALESCE(a.attgenerated, '') != '') AS has_default,
+                COALESCE(a.attgenerated, '') != '' AS is_generated,
+                a.attidentity = 'a' AS is_identity_always
             FROM pg_attribute a
             JOIN pg_class c ON c.oid = a.attrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -124,11 +134,503 @@ async fn load_mutation_target<C: GenericClient>(
             type_schema: row.get(1),
             type_name: row.get(2),
             is_primary_key: row.get(3),
-            is_generated: row.get(4),
+            is_nullable: row.get(4),
+            has_default: row.get(5),
+            is_generated: row.get(6),
+            is_identity_always: row.get(7),
         })
         .collect();
 
     Ok((relkind, cols))
+}
+
+fn decode_returned_row(row: &Row) -> RowData {
+    let mut cells = Vec::with_capacity(row.len());
+    for i in 0..row.len() {
+        cells.push(map_cell_value(row, i));
+    }
+    RowData { cells }
+}
+
+fn canonical_pk_key(
+    pk_columns: &[String],
+    pk_values: &[CellValue],
+) -> Result<Vec<(String, Option<String>)>, LucidError> {
+    let mut pairs = Vec::with_capacity(pk_columns.len());
+    for (col, val) in pk_columns.iter().zip(pk_values.iter()) {
+        let param = cell_value_to_param(val, "primary key")?;
+        pairs.push((col.clone(), param));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+fn validate_pk_and_xmin(
+    op_label: &str,
+    row_num: usize,
+    schema_name: &str,
+    table_name: &str,
+    pk_columns: &[String],
+    pk_values: &[CellValue],
+    original_xmin: &str,
+    expected_pk_set: &HashSet<&str>,
+    col_map: &HashMap<String, &MutationColumnInfo>,
+) -> Result<(), LucidError> {
+    if pk_columns.is_empty() || pk_columns.len() != pk_values.len() {
+        return Err(LucidError::DatabaseError {
+            code: "22023".into(),
+            message: format!(
+                "{} at row {} has invalid primary key columns ({}) or values ({}).",
+                op_label,
+                row_num,
+                pk_columns.len(),
+                pk_values.len()
+            ),
+            detail: None,
+        });
+    }
+
+    let provided_pk_set: HashSet<&str> = pk_columns.iter().map(|s| s.as_str()).collect();
+    if provided_pk_set != *expected_pk_set || provided_pk_set.len() != pk_columns.len() {
+        return Err(LucidError::DatabaseError {
+            code: "22023".into(),
+            message: format!(
+                "{} at row {} does not specify the complete primary key for '{}.{}'.",
+                op_label, row_num, schema_name, table_name
+            ),
+            detail: None,
+        });
+    }
+
+    if original_xmin.is_empty() || !original_xmin.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(LucidError::DatabaseError {
+            code: "22023".into(),
+            message: format!(
+                "{} at row {} has a missing or invalid row version (xmin).",
+                op_label, row_num
+            ),
+            detail: None,
+        });
+    }
+
+    for (j, pk_name) in pk_columns.iter().enumerate() {
+        if !col_map.contains_key(pk_name) {
+            return Err(LucidError::DatabaseError {
+                code: "42703".into(),
+                message: format!("Primary key column '{}' not found in table.", pk_name),
+                detail: None,
+            });
+        }
+        if matches!(pk_values[j], CellValue::Null) {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!("Primary key column '{}' cannot be NULL.", pk_name),
+                detail: None,
+            });
+        }
+        let _ = cell_value_to_param(&pk_values[j], "primary key")?;
+    }
+
+    Ok(())
+}
+
+fn append_pk_and_xmin_where(
+    where_clauses: &mut Vec<String>,
+    params_storage: &mut Vec<Option<String>>,
+    pk_columns: &[String],
+    pk_values: &[CellValue],
+    original_xmin: &str,
+    col_map: &HashMap<String, &MutationColumnInfo>,
+) -> Result<(), LucidError> {
+    let param_offset = params_storage.len();
+    for (j, pk_name) in pk_columns.iter().enumerate() {
+        let col_meta = col_map.get(pk_name).unwrap();
+        let param = cell_value_to_param(&pk_values[j], "primary key")?;
+        let clean_pk = sanitize_identifier(pk_name);
+        let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
+        let clean_type_name = sanitize_identifier(&col_meta.type_name);
+        let param_idx = param_offset + j + 1;
+        where_clauses.push(format!(
+            r#""{}" = CAST(${}::text AS "{}"."{}")"#,
+            clean_pk, param_idx, clean_type_schema, clean_type_name
+        ));
+        params_storage.push(param);
+    }
+
+    let xmin_param_idx = params_storage.len() + 1;
+    where_clauses.push(format!("xmin::text = ${}::text", xmin_param_idx));
+    params_storage.push(Some(original_xmin.to_string()));
+    Ok(())
+}
+
+async fn execute_delete(
+    tx: &Transaction<'_>,
+    schema_name: &str,
+    table_name: &str,
+    clean_schema: &str,
+    clean_table: &str,
+    delete_op: &RowDelete,
+    col_map: &HashMap<String, &MutationColumnInfo>,
+) -> Result<(), LucidError> {
+    let mut where_clauses = Vec::new();
+    let mut params_storage = Vec::new();
+    append_pk_and_xmin_where(
+        &mut where_clauses,
+        &mut params_storage,
+        &delete_op.primary_key_columns,
+        &delete_op.primary_key_values,
+        &delete_op.original_xmin,
+        col_map,
+    )?;
+
+    let sql = format!(
+        r#"DELETE FROM "{}"."{}" WHERE {} RETURNING 1;"#,
+        clean_schema,
+        clean_table,
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&(dyn ToSql + Sync)> =
+        params_storage.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+
+    let rows = tx.query(&sql, &params_refs).await.map_err(map_postgres_error)?;
+    if rows.is_empty() {
+        let pk_strs: Vec<String> = delete_op
+            .primary_key_values
+            .iter()
+            .map(format_cell_value_for_display)
+            .collect();
+        return Err(LucidError::ConflictDetected {
+            table_name: format!("{}.{}", schema_name, table_name),
+            primary_key_values: pk_strs,
+        });
+    }
+    Ok(())
+}
+
+async fn execute_update(
+    tx: &Transaction<'_>,
+    schema_name: &str,
+    table_name: &str,
+    clean_schema: &str,
+    clean_table: &str,
+    returning_clause: &str,
+    mutation: &RowMutation,
+    col_map: &HashMap<String, &MutationColumnInfo>,
+) -> Result<(String, RowData), LucidError> {
+    let mut set_clauses = Vec::new();
+    let mut params_storage: Vec<Option<String>> = Vec::new();
+
+    for (i, col_name) in mutation.updated_columns.iter().enumerate() {
+        let col_meta = col_map.get(col_name).unwrap();
+        let clean_col = sanitize_identifier(col_name);
+        let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
+        let clean_type_name = sanitize_identifier(&col_meta.type_name);
+        let param_idx = i + 1;
+        set_clauses.push(format!(
+            r#""{}" = CAST(${}::text AS "{}"."{}")"#,
+            clean_col, param_idx, clean_type_schema, clean_type_name
+        ));
+        let param = cell_value_to_param(&mutation.updated_values[i], "column")?;
+        params_storage.push(param);
+    }
+
+    let mut where_clauses = Vec::new();
+    append_pk_and_xmin_where(
+        &mut where_clauses,
+        &mut params_storage,
+        &mutation.primary_key_columns,
+        &mutation.primary_key_values,
+        &mutation.original_xmin,
+        col_map,
+    )?;
+
+    let sql = format!(
+        r#"UPDATE "{}"."{}" SET {} WHERE {} RETURNING {};"#,
+        clean_schema,
+        clean_table,
+        set_clauses.join(", "),
+        where_clauses.join(" AND "),
+        returning_clause
+    );
+    let params_refs: Vec<&(dyn ToSql + Sync)> =
+        params_storage.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+
+    let rows = tx.query(&sql, &params_refs).await.map_err(map_postgres_error)?;
+    if rows.is_empty() {
+        let pk_strs: Vec<String> = mutation
+            .primary_key_values
+            .iter()
+            .map(format_cell_value_for_display)
+            .collect();
+        return Err(LucidError::ConflictDetected {
+            table_name: format!("{}.{}", schema_name, table_name),
+            primary_key_values: pk_strs,
+        });
+    }
+
+    let new_xmin: String = rows[0].get(0);
+    let row_data = decode_returned_row(&rows[0]);
+    Ok((new_xmin, row_data))
+}
+
+async fn execute_insert(
+    tx: &Transaction<'_>,
+    clean_schema: &str,
+    clean_table: &str,
+    returning_clause: &str,
+    insert_op: &RowInsert,
+    col_map: &HashMap<String, &MutationColumnInfo>,
+) -> Result<InsertedRowResult, LucidError> {
+    let row = if insert_op.columns.is_empty() {
+        let sql = format!(
+            r#"INSERT INTO "{}"."{}" DEFAULT VALUES RETURNING {};"#,
+            clean_schema, clean_table, returning_clause
+        );
+        tx.query_one(&sql, &[]).await.map_err(map_postgres_error)?
+    } else {
+        let mut quoted_cols = Vec::with_capacity(insert_op.columns.len());
+        let mut value_exprs = Vec::with_capacity(insert_op.columns.len());
+        let mut params_storage: Vec<Option<String>> = Vec::with_capacity(insert_op.columns.len());
+
+        for (i, col_name) in insert_op.columns.iter().enumerate() {
+            let col_meta = col_map.get(col_name).unwrap();
+            let clean_col = sanitize_identifier(col_name);
+            let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
+            let clean_type_name = sanitize_identifier(&col_meta.type_name);
+            quoted_cols.push(format!(r#""{}""#, clean_col));
+            value_exprs.push(format!(
+                r#"CAST(${}::text AS "{}"."{}")"#,
+                i + 1,
+                clean_type_schema,
+                clean_type_name
+            ));
+            params_storage.push(cell_value_to_param(&insert_op.values[i], "insert column")?);
+        }
+
+        let sql = format!(
+            r#"INSERT INTO "{}"."{}" ({}) VALUES ({}) RETURNING {};"#,
+            clean_schema,
+            clean_table,
+            quoted_cols.join(", "),
+            value_exprs.join(", "),
+            returning_clause
+        );
+        let params_refs: Vec<&(dyn ToSql + Sync)> =
+            params_storage.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        tx.query_one(&sql, &params_refs).await.map_err(map_postgres_error)?
+    };
+
+    Ok(InsertedRowResult {
+        client_row_id: insert_op.client_row_id.clone(),
+        row: decode_returned_row(&row),
+    })
+}
+
+fn validate_batch_requests(
+    req: &BatchMutationRequest,
+    columns: &[MutationColumnInfo],
+    col_map: &HashMap<String, &MutationColumnInfo>,
+    expected_pk_set: &HashSet<&str>,
+) -> Result<(), LucidError> {
+    let mut delete_pks: HashSet<Vec<(String, Option<String>)>> = HashSet::new();
+    for (idx, del) in req.deletes.iter().enumerate() {
+        validate_pk_and_xmin(
+            "Delete",
+            idx + 1,
+            &req.schema_name,
+            &req.table_name,
+            &del.primary_key_columns,
+            &del.primary_key_values,
+            &del.original_xmin,
+            expected_pk_set,
+            col_map,
+        )?;
+        let pk_key = canonical_pk_key(&del.primary_key_columns, &del.primary_key_values)?;
+        if !delete_pks.insert(pk_key) {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Delete at row {} duplicates another staged deletion for the same primary key.",
+                    idx + 1
+                ),
+                detail: None,
+            });
+        }
+    }
+
+    let mut update_pks: HashSet<Vec<(String, Option<String>)>> = HashSet::new();
+    for (idx, m) in req.mutations.iter().enumerate() {
+        if m.updated_columns.is_empty() {
+            continue;
+        }
+        if m.updated_columns.len() != m.updated_values.len() {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Mutation at row {} has mismatched updated columns ({}) and values ({}).",
+                    idx + 1,
+                    m.updated_columns.len(),
+                    m.updated_values.len()
+                ),
+                detail: None,
+            });
+        }
+        validate_pk_and_xmin(
+            "Mutation",
+            idx + 1,
+            &req.schema_name,
+            &req.table_name,
+            &m.primary_key_columns,
+            &m.primary_key_values,
+            &m.original_xmin,
+            expected_pk_set,
+            col_map,
+        )?;
+
+        let pk_key = canonical_pk_key(&m.primary_key_columns, &m.primary_key_values)?;
+        if delete_pks.contains(&pk_key) {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Row {} in '{}.{}' is staged for both update and deletion in the same batch. Undo one operation before applying.",
+                    idx + 1,
+                    req.schema_name,
+                    req.table_name
+                ),
+                detail: None,
+            });
+        }
+        if !update_pks.insert(pk_key) {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Mutation at row {} duplicates another update for the same primary key in one batch.",
+                    idx + 1
+                ),
+                detail: None,
+            });
+        }
+
+        let mut seen_cols = HashSet::new();
+        for (col_idx, col_name) in m.updated_columns.iter().enumerate() {
+            if !seen_cols.insert(col_name.as_str()) {
+                return Err(LucidError::DatabaseError {
+                    code: "22023".into(),
+                    message: format!("Duplicate column '{}' in row {} update.", col_name, idx + 1),
+                    detail: None,
+                });
+            }
+            if let Some(col_meta) = col_map.get(col_name) {
+                if col_meta.is_generated {
+                    return Err(LucidError::DatabaseError {
+                        code: "428C9".into(),
+                        message: format!(
+                            "Column '{}' in table '{}.{}' is a generated column and cannot be edited.",
+                            col_name, req.schema_name, req.table_name
+                        ),
+                        detail: None,
+                    });
+                }
+                if col_meta.is_identity_always {
+                    return Err(LucidError::DatabaseError {
+                        code: "428C9".into(),
+                        message: format!(
+                            "Column '{}' in table '{}.{}' is GENERATED ALWAYS AS IDENTITY and cannot be assigned an explicit value.",
+                            col_name, req.schema_name, req.table_name
+                        ),
+                        detail: None,
+                    });
+                }
+            } else {
+                return Err(LucidError::DatabaseError {
+                    code: "42703".into(),
+                    message: format!(
+                        "Column '{}' does not exist in table '{}.{}'.",
+                        col_name, req.schema_name, req.table_name
+                    ),
+                    detail: None,
+                });
+            }
+            let _ = cell_value_to_param(&m.updated_values[col_idx], "column")?;
+        }
+    }
+
+    for (idx, ins) in req.inserts.iter().enumerate() {
+        if ins.columns.len() != ins.values.len() {
+            return Err(LucidError::DatabaseError {
+                code: "22023".into(),
+                message: format!(
+                    "Insert draft {} has mismatched columns ({}) and values ({}).",
+                    idx + 1,
+                    ins.columns.len(),
+                    ins.values.len()
+                ),
+                detail: None,
+            });
+        }
+
+        let mut supplied_cols = HashSet::new();
+        for (col_idx, col_name) in ins.columns.iter().enumerate() {
+            if !supplied_cols.insert(col_name.as_str()) {
+                return Err(LucidError::DatabaseError {
+                    code: "22023".into(),
+                    message: format!("Duplicate column '{}' in insert draft {}.", col_name, idx + 1),
+                    detail: None,
+                });
+            }
+            if let Some(col_meta) = col_map.get(col_name) {
+                if col_meta.is_generated {
+                    return Err(LucidError::DatabaseError {
+                        code: "428C9".into(),
+                        message: format!(
+                            "Column '{}' in '{}.{}' is a generated column; leave it DEFAULT on insert.",
+                            col_name, req.schema_name, req.table_name
+                        ),
+                        detail: None,
+                    });
+                }
+                if col_meta.is_identity_always {
+                    return Err(LucidError::DatabaseError {
+                        code: "428C9".into(),
+                        message: format!(
+                            "Column '{}' in '{}.{}' is GENERATED ALWAYS AS IDENTITY; leave it DEFAULT on insert.",
+                            col_name, req.schema_name, req.table_name
+                        ),
+                        detail: None,
+                    });
+                }
+            } else {
+                return Err(LucidError::DatabaseError {
+                    code: "42703".into(),
+                    message: format!(
+                        "Column '{}' does not exist in table '{}.{}'.",
+                        col_name, req.schema_name, req.table_name
+                    ),
+                    detail: None,
+                });
+            }
+            let _ = cell_value_to_param(&ins.values[col_idx], "insert column")?;
+        }
+
+        for col_meta in columns {
+            if !col_meta.is_nullable
+                && !col_meta.has_default
+                && !supplied_cols.contains(col_meta.name.as_str())
+            {
+                return Err(LucidError::DatabaseError {
+                    code: "23502".into(),
+                    message: format!(
+                        "Insert draft {}: column '{}' is NOT NULL and has no default value.",
+                        idx + 1,
+                        col_meta.name
+                    ),
+                    detail: None,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn execute_batch_mutation(
@@ -144,16 +646,23 @@ pub async fn execute_batch_mutation(
         });
     }
 
-    if req.mutations.is_empty() {
+    let has_any_op =
+        !req.deletes.is_empty() || !req.mutations.is_empty() || !req.inserts.is_empty();
+    if !has_any_op {
         return Ok(BatchMutationResult {
             rows_affected: 0,
+            updated_count: 0,
+            inserted_count: 0,
+            deleted_count: 0,
             updated_xmins: Vec::new(),
+            updated_rows: Vec::new(),
+            inserted_rows: Vec::new(),
         });
     }
 
     let tx = client.transaction().await.map_err(map_postgres_error)?;
 
-    // 1. Inspect target relation and columns inside the transaction
+    // 1. Inspect target relation and columns inside the isolated transaction
     let (relkind, columns) = load_mutation_target(&tx, &req.schema_name, &req.table_name).await?;
     if relkind != "r" && relkind != "p" {
         let _ = tx.rollback().await;
@@ -182,212 +691,109 @@ pub async fn execute_batch_mutation(
     }
 
     let expected_pk_set: HashSet<&str> = pk_cols.iter().map(|s| s.as_str()).collect();
-    let clean_schema = sanitize_identifier(&req.schema_name);
-    let clean_table = sanitize_identifier(&req.table_name);
-    let mut updated_xmins = Vec::with_capacity(req.mutations.len());
-
-    for (idx, m) in req.mutations.iter().enumerate() {
-        if m.updated_columns.is_empty() {
-            continue;
-        }
-
-        if m.updated_columns.len() != m.updated_values.len() {
-            let _ = tx.rollback().await;
-            return Err(LucidError::DatabaseError {
-                code: "22023".into(),
-                message: format!(
-                    "Mutation at row {} has mismatched updated columns ({}) and values ({})",
-                    idx + 1,
-                    m.updated_columns.len(),
-                    m.updated_values.len()
-                ),
-                detail: None,
-            });
-        }
-
-        if m.primary_key_columns.is_empty()
-            || m.primary_key_columns.len() != m.primary_key_values.len()
-        {
-            let _ = tx.rollback().await;
-            return Err(LucidError::DatabaseError {
-                code: "22023".into(),
-                message: format!(
-                    "Mutation at row {} has invalid primary key columns ({}) or values ({}).",
-                    idx + 1,
-                    m.primary_key_columns.len(),
-                    m.primary_key_values.len()
-                ),
-                detail: None,
-            });
-        }
-
-        let provided_pk_set: HashSet<&str> =
-            m.primary_key_columns.iter().map(|s| s.as_str()).collect();
-        if provided_pk_set != expected_pk_set {
-            let _ = tx.rollback().await;
-            return Err(LucidError::DatabaseError {
-                code: "22023".into(),
-                message: format!(
-                    "Mutation at row {} does not specify the complete primary key for '{}.{}'.",
-                    idx + 1,
-                    req.schema_name,
-                    req.table_name
-                ),
-                detail: None,
-            });
-        }
-
-        if m.original_xmin.is_empty() || !m.original_xmin.bytes().all(|b| b.is_ascii_digit()) {
-            let _ = tx.rollback().await;
-            return Err(LucidError::DatabaseError {
-                code: "22023".into(),
-                message: format!(
-                    "Mutation at row {} has a missing or invalid row version (xmin).",
-                    idx + 1
-                ),
-                detail: None,
-            });
-        }
-
-        // Verify none of updated columns are generated or missing
-        for col_name in &m.updated_columns {
-            if let Some(col_meta) = col_map.get(col_name) {
-                if col_meta.is_generated {
-                    let _ = tx.rollback().await;
-                    return Err(LucidError::DatabaseError {
-                        code: "428C9".into(),
-                        message: format!(
-                            "Column '{}' in table '{}.{}' is a generated column and cannot be edited.",
-                            col_name, req.schema_name, req.table_name
-                        ),
-                        detail: None,
-                    });
-                }
-            } else {
-                let _ = tx.rollback().await;
-                return Err(LucidError::DatabaseError {
-                    code: "42703".into(),
-                    message: format!(
-                        "Column '{}' does not exist in table '{}.{}'.",
-                        col_name, req.schema_name, req.table_name
-                    ),
-                    detail: None,
-                });
-            }
-        }
-
-        // Build SET clauses
-        let mut set_clauses = Vec::new();
-        let mut params_storage: Vec<Option<String>> = Vec::new();
-
-        for (i, col_name) in m.updated_columns.iter().enumerate() {
-            let col_meta = col_map.get(col_name).unwrap();
-            let clean_col = sanitize_identifier(col_name);
-            let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
-            let clean_type_name = sanitize_identifier(&col_meta.type_name);
-            let param_idx = i + 1;
-            set_clauses.push(format!(
-                r#""{}" = CAST(${}::text AS "{}"."{}")"#,
-                clean_col, param_idx, clean_type_schema, clean_type_name
-            ));
-            let param = match cell_value_to_param(&m.updated_values[i], "column") {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    return Err(e);
-                }
-            };
-            params_storage.push(param);
-        }
-
-        // Build WHERE clauses for primary keys
-        let param_offset = m.updated_columns.len();
-        let mut where_clauses = Vec::new();
-
-        for (j, pk_name) in m.primary_key_columns.iter().enumerate() {
-            let col_meta = col_map.get(pk_name).ok_or_else(|| LucidError::DatabaseError {
-                code: "42703".into(),
-                message: format!("Primary key column '{}' not found in table", pk_name),
-                detail: None,
-            })?;
-            if matches!(m.primary_key_values[j], CellValue::Null) {
-                let _ = tx.rollback().await;
-                return Err(LucidError::DatabaseError {
-                    code: "22023".into(),
-                    message: format!("Primary key column '{}' cannot be NULL.", pk_name),
-                    detail: None,
-                });
-            }
-            let param = match cell_value_to_param(&m.primary_key_values[j], "primary key") {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    return Err(e);
-                }
-            };
-            let clean_pk = sanitize_identifier(pk_name);
-            let clean_type_schema = sanitize_identifier(&col_meta.type_schema);
-            let clean_type_name = sanitize_identifier(&col_meta.type_name);
-            let param_idx = param_offset + j + 1;
-            where_clauses.push(format!(
-                r#""{}" = CAST(${}::text AS "{}"."{}")"#,
-                clean_pk, param_idx, clean_type_schema, clean_type_name
-            ));
-            params_storage.push(param);
-        }
-
-        // Concurrency xmin check
-        let xmin_param_idx = param_offset + m.primary_key_columns.len() + 1;
-        where_clauses.push(format!("xmin::text = ${}::text", xmin_param_idx));
-        params_storage.push(Some(m.original_xmin.clone()));
-
-        let sql = format!(
-            r#"UPDATE "{}"."{}" SET {} WHERE {} RETURNING xmin::text;"#,
-            clean_schema,
-            clean_table,
-            set_clauses.join(", "),
-            where_clauses.join(" AND ")
-        );
-
-        let params_refs: Vec<&(dyn ToSql + Sync)> = params_storage
-            .iter()
-            .map(|p| p as &(dyn ToSql + Sync))
-            .collect();
-
-        let rows = match tx.query(&sql, &params_refs).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.rollback().await;
-                return Err(map_postgres_error(e));
-            }
-        };
-
-        if rows.is_empty() {
-            // Concurrent modification conflict detected!
-            let _ = tx.rollback().await;
-            let pk_strs: Vec<String> = m
-                .primary_key_values
-                .iter()
-                .map(format_cell_value_for_display)
-                .collect();
-
-            return Err(LucidError::ConflictDetected {
-                table_name: format!("{}.{}", req.schema_name, req.table_name),
-                primary_key_values: pk_strs,
-            });
-        }
-
-        let new_xmin: String = rows[0].get(0);
-        updated_xmins.push(new_xmin);
+    if let Err(e) = validate_batch_requests(&req, &columns, &col_map, &expected_pk_set) {
+        let _ = tx.rollback().await;
+        return Err(e);
     }
 
+    let clean_schema = sanitize_identifier(&req.schema_name);
+    let clean_table = sanitize_identifier(&req.table_name);
+    let returning_cols: Vec<String> = std::iter::once("xmin::text".to_string())
+        .chain(
+            columns
+                .iter()
+                .map(|c| format!(r#""{}""#, sanitize_identifier(&c.name))),
+        )
+        .collect();
+    let returning_clause = returning_cols.join(", ");
+
+    // Deterministic Phase 1: Deletes
+    let mut deleted_count: u64 = 0;
+    for delete_op in &req.deletes {
+        if let Err(e) = execute_delete(
+            &tx,
+            &req.schema_name,
+            &req.table_name,
+            &clean_schema,
+            &clean_table,
+            delete_op,
+            &col_map,
+        )
+        .await
+        {
+            let _ = tx.rollback().await;
+            return Err(e);
+        }
+        deleted_count += 1;
+    }
+
+    // Deterministic Phase 2: Updates
+    let mut updated_xmins = Vec::with_capacity(req.mutations.len());
+    let mut updated_rows = Vec::with_capacity(req.mutations.len());
+    for mutation in &req.mutations {
+        if mutation.updated_columns.is_empty() {
+            continue;
+        }
+        match execute_update(
+            &tx,
+            &req.schema_name,
+            &req.table_name,
+            &clean_schema,
+            &clean_table,
+            &returning_clause,
+            mutation,
+            &col_map,
+        )
+        .await
+        {
+            Ok((new_xmin, row_data)) => {
+                updated_xmins.push(new_xmin);
+                updated_rows.push(row_data);
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(e);
+            }
+        }
+    }
+
+    // Deterministic Phase 3: Inserts
+    let mut inserted_rows = Vec::with_capacity(req.inserts.len());
+    for insert_op in &req.inserts {
+        match execute_insert(
+            &tx,
+            &clean_schema,
+            &clean_table,
+            &returning_clause,
+            insert_op,
+            &col_map,
+        )
+        .await
+        {
+            Ok(res) => inserted_rows.push(res),
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(e);
+            }
+        }
+    }
+
+    // Never retry automatically after ambiguous commit failures.
     tx.commit().await.map_err(|e| LucidError::UncertainCommitOutcome {
         message: e.to_string(),
     })?;
 
+    let updated_count = updated_rows.len() as u64;
+    let inserted_count = inserted_rows.len() as u64;
+
     Ok(BatchMutationResult {
-        rows_affected: updated_xmins.len() as u64,
+        rows_affected: deleted_count + updated_count + inserted_count,
+        updated_count,
+        inserted_count,
+        deleted_count,
         updated_xmins,
+        updated_rows,
+        inserted_rows,
     })
 }
 
@@ -453,6 +859,8 @@ mod tests {
                     CellValue::Text("".into()),
                 ],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await.unwrap();
@@ -509,6 +917,8 @@ mod tests {
                 updated_columns: vec!["name".into()],
                 updated_values: vec![CellValue::Text("Alice Cooper".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await.unwrap();
@@ -548,6 +958,8 @@ mod tests {
                 updated_columns: vec!["val".into()],
                 updated_values: vec![CellValue::Text("stale edit".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await;
@@ -608,6 +1020,8 @@ mod tests {
                     updated_values: vec![CellValue::Text("second_updated".into())],
                 },
             ],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await;
@@ -654,6 +1068,8 @@ mod tests {
                 updated_columns: vec!["val".into()],
                 updated_values: vec![CellValue::Text("updated".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await;
@@ -701,6 +1117,8 @@ mod tests {
                 updated_columns: vec!["gen_val".into()],
                 updated_values: vec![CellValue::Integer(99)],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await;
@@ -751,6 +1169,8 @@ mod tests {
                 updated_columns: vec!["col_null".into(), "col_empty".into()],
                 updated_values: vec![CellValue::Null, CellValue::Text("".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await.unwrap();
@@ -785,6 +1205,8 @@ mod tests {
                 updated_columns: vec!["amname".into()],
                 updated_values: vec![CellValue::Text("btree_hacked".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await;
@@ -794,6 +1216,12 @@ mod tests {
             schema_name: "information_schema".into(),
             table_name: "tables".into(),
             mutations: vec![],
+            inserts: vec![RowInsert {
+                client_row_id: "d1".into(),
+                columns: vec![],
+                values: vec![],
+            }],
+            deletes: vec![],
         };
         let info_res = execute_batch_mutation(&mut client, info_req).await;
         assert!(matches!(info_res, Err(LucidError::ReadOnlyViolation { .. })));
@@ -837,6 +1265,8 @@ mod tests {
                 updated_columns: vec!["label".into()],
                 updated_values: vec![CellValue::Text("changed".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
         let bad_pk_res = execute_batch_mutation(&mut client, bad_pk_req).await;
         assert!(matches!(
@@ -856,6 +1286,8 @@ mod tests {
                 updated_columns: vec!["label".into()],
                 updated_values: vec![CellValue::Unsupported("text: raw display".into())],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
         let bad_val_res = execute_batch_mutation(&mut client, bad_val_req).await;
         assert!(matches!(
@@ -926,6 +1358,8 @@ mod tests {
                     CellValue::Null,
                 ],
             }],
+            inserts: vec![],
+            deletes: vec![],
         };
 
         let res = execute_batch_mutation(&mut client, req).await.unwrap();
@@ -940,6 +1374,396 @@ mod tests {
         );
         assert_eq!(page_after.rows[0].cells[4], CellValue::Text("debit".into()));
         assert_eq!(page_after.rows[0].cells[5], CellValue::Null);
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_insert_defaults_identity_generated_null_and_empty() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_insert_defaults";
+        let table = "items";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TABLE "{}"."{}" (
+                    id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    code text NOT NULL DEFAULT 'DEF-CODE',
+                    note text DEFAULT 'def-note',
+                    amount numeric(10, 2) NOT NULL DEFAULT 12.50,
+                    doubled numeric(12, 2) GENERATED ALWAYS AS (amount * 2) STORED
+                );
+                "#,
+                schema, schema, schema, table
+            ))
+            .await
+            .unwrap();
+
+        // Check schema introspection flags including is_identity and is_identity_always
+        let cols = crate::schema::introspection::query_columns(&client, schema, table)
+            .await
+            .unwrap();
+        assert!(cols[0].is_identity && cols[0].is_identity_always && cols[0].is_primary_key);
+        assert_eq!(cols[1].default_value.as_deref(), Some("'DEF-CODE'::text"));
+        assert!(cols[4].is_generated);
+
+        // 1. Insert with DEFAULT VALUES (omits every column)
+        // 2. Insert distinguishing DEFAULT (omit code), explicit NULL (note), empty string "" (on code -> second insert)
+        let req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![
+                RowInsert {
+                    client_row_id: "draft-defaults".into(),
+                    columns: vec![],
+                    values: vec![],
+                },
+                RowInsert {
+                    client_row_id: "draft-explicit".into(),
+                    columns: vec!["code".into(), "note".into(), "amount".into()],
+                    values: vec![
+                        CellValue::Text("".into()),
+                        CellValue::Null,
+                        CellValue::Decimal("25.00".into()),
+                    ],
+                },
+            ],
+            deletes: vec![],
+        };
+
+        let res = execute_batch_mutation(&mut client, req).await.unwrap();
+        assert_eq!(res.rows_affected, 2);
+        assert_eq!(res.inserted_count, 2);
+        assert_eq!(res.inserted_rows.len(), 2);
+
+        // Returned row 1: id=1, code='DEF-CODE', note='def-note', amount=12.50, doubled=25.00
+        let r1 = &res.inserted_rows[0];
+        assert_eq!(r1.client_row_id, "draft-defaults");
+        assert!(matches!(r1.row.cells[0], CellValue::Text(_))); // xmin
+        assert_eq!(r1.row.cells[1], CellValue::Integer(1));
+        assert_eq!(r1.row.cells[2], CellValue::Text("DEF-CODE".into()));
+        assert_eq!(r1.row.cells[3], CellValue::Text("def-note".into()));
+        assert_eq!(r1.row.cells[4], CellValue::Decimal("12.50".into()));
+        assert_eq!(r1.row.cells[5], CellValue::Decimal("25.00".into()));
+
+        // Returned row 2: id=2, code='', note=NULL (overrode default!), amount=25.00, doubled=50.00
+        let r2 = &res.inserted_rows[1];
+        assert_eq!(r2.client_row_id, "draft-explicit");
+        assert_eq!(r2.row.cells[1], CellValue::Integer(2));
+        assert_eq!(r2.row.cells[2], CellValue::Text("".into()));
+        assert_eq!(r2.row.cells[3], CellValue::Null);
+        assert_eq!(r2.row.cells[4], CellValue::Decimal("25.00".into()));
+        assert_eq!(r2.row.cells[5], CellValue::Decimal("50.00".into()));
+
+        // Explicitly supplying GENERATED ALWAYS AS IDENTITY fails cleanly with 428C9
+        let bad_identity_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![RowInsert {
+                client_row_id: "bad-id".into(),
+                columns: vec!["id".into()],
+                values: vec![CellValue::Integer(99)],
+            }],
+            deletes: vec![],
+        };
+        let bad_id_res = execute_batch_mutation(&mut client, bad_identity_req).await;
+        assert!(matches!(
+            bad_id_res,
+            Err(LucidError::DatabaseError { ref code, .. }) if code == "428C9"
+        ));
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_insert_missing_not_null_and_identity_by_default() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_insert_validation";
+        let table = "tasks";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TABLE "{}"."{}" (
+                    id int GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    title text NOT NULL
+                );
+                "#,
+                schema, schema, schema, table
+            ))
+            .await
+            .unwrap();
+
+        // Omitting required NOT NULL column `title` fails with 23502
+        let missing_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![RowInsert {
+                client_row_id: "missing-title".into(),
+                columns: vec![],
+                values: vec![],
+            }],
+            deletes: vec![],
+        };
+        let err = execute_batch_mutation(&mut client, missing_req).await.unwrap_err();
+        assert!(matches!(err, LucidError::DatabaseError { ref code, .. } if code == "23502"));
+
+        // BY DEFAULT identity can be overridden explicitly
+        let explicit_id_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![RowInsert {
+                client_row_id: "explicit-id".into(),
+                columns: vec!["id".into(), "title".into()],
+                values: vec![CellValue::Integer(500), CellValue::Text("Pinned ID".into())],
+            }],
+            deletes: vec![],
+        };
+        let res = execute_batch_mutation(&mut client, explicit_id_req).await.unwrap();
+        assert_eq!(res.inserted_rows[0].row.cells[1], CellValue::Integer(500));
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete_success_and_xmin_conflict_rollback() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_delete";
+        let table = "entries";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TABLE "{}"."{}" (id int PRIMARY KEY, name text NOT NULL);
+                INSERT INTO "{}"."{}" VALUES (1, 'one'), (2, 'two');
+                "#,
+                schema, schema, schema, table, schema, table
+            ))
+            .await
+            .unwrap();
+
+        let r1 = client
+            .query_one(&format!(r#"SELECT xmin::text FROM "{}"."{}" WHERE id = 1"#, schema, table), &[])
+            .await
+            .unwrap();
+        let xmin1: String = r1.get(0);
+
+        // Stale xmin delete on row 2 aborts earlier delete of row 1 cleanly
+        let conflict_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![],
+            deletes: vec![
+                RowDelete {
+                    primary_key_columns: vec!["id".into()],
+                    primary_key_values: vec![CellValue::Integer(1)],
+                    original_xmin: xmin1.clone(),
+                },
+                RowDelete {
+                    primary_key_columns: vec!["id".into()],
+                    primary_key_values: vec![CellValue::Integer(2)],
+                    original_xmin: "999999".into(),
+                },
+            ],
+        };
+        let err = execute_batch_mutation(&mut client, conflict_req).await.unwrap_err();
+        assert!(matches!(err, LucidError::ConflictDetected { .. }));
+
+        // Row 1 must still exist after rollback
+        let count: i64 = client
+            .query_one(&format!(r#"SELECT count(*) FROM "{}"."{}""#, schema, table), &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 2);
+
+        // Valid delete succeeds
+        let ok_req = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![],
+            inserts: vec![],
+            deletes: vec![RowDelete {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(1)],
+                original_xmin: xmin1,
+            }],
+        };
+        let res = execute_batch_mutation(&mut client, ok_req).await.unwrap();
+        assert_eq!(res.deleted_count, 1);
+        assert_eq!(res.rows_affected, 1);
+
+        let count_after: i64 = client
+            .query_one(&format!(r#"SELECT count(*) FROM "{}"."{}""#, schema, table), &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count_after, 1);
+
+        let _ = client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_mixed_batch_ordering_and_constraint_rollback_and_conflict_rejection() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let mut client = pool.get().await.unwrap();
+
+        let schema = "test_lucid_mixed_batch";
+        let table = "users";
+        client
+            .batch_execute(&format!(
+                r#"
+                DROP SCHEMA IF EXISTS "{}" CASCADE;
+                CREATE SCHEMA "{}";
+                CREATE TABLE "{}"."{}" (
+                    id int PRIMARY KEY,
+                    email text NOT NULL UNIQUE
+                );
+                INSERT INTO "{}"."{}" VALUES (1, 'old@example.com'), (2, 'keep@example.com');
+                "#,
+                schema, schema, schema, table, schema, table
+            ))
+            .await
+            .unwrap();
+
+        let r1 = client
+            .query_one(&format!(r#"SELECT xmin::text FROM "{}"."{}" WHERE id = 1"#, schema, table), &[])
+            .await
+            .unwrap();
+        let r2 = client
+            .query_one(&format!(r#"SELECT xmin::text FROM "{}"."{}" WHERE id = 2"#, schema, table), &[])
+            .await
+            .unwrap();
+        let xmin1: String = r1.get(0);
+        let xmin2: String = r2.get(0);
+
+        // Conflicting update + delete targeting same PK 1 must be rejected cleanly without guessing
+        let same_row_conflict = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(1)],
+                original_xmin: xmin1.clone(),
+                updated_columns: vec!["email".into()],
+                updated_values: vec![CellValue::Text("x@example.com".into())],
+            }],
+            inserts: vec![],
+            deletes: vec![RowDelete {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(1)],
+                original_xmin: xmin1.clone(),
+            }],
+        };
+        let conflict_err = execute_batch_mutation(&mut client, same_row_conflict)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            conflict_err,
+            LucidError::DatabaseError { ref code, ref message, .. }
+                if code == "22023" && message.contains("both update and deletion")
+        ));
+
+        // Mixed batch constraint failure rolls back prior delete & update completely
+        let failing_mixed = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            deletes: vec![RowDelete {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(1)],
+                original_xmin: xmin1.clone(),
+            }],
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(2)],
+                original_xmin: xmin2.clone(),
+                updated_columns: vec!["email".into()],
+                updated_values: vec![CellValue::Text("updated@example.com".into())],
+            }],
+            inserts: vec![RowInsert {
+                client_row_id: "dup-insert".into(),
+                columns: vec!["id".into(), "email".into()],
+                // Collides with row 2's updated email!
+                values: vec![CellValue::Integer(3), CellValue::Text("updated@example.com".into())],
+            }],
+        };
+        let rollback_err = execute_batch_mutation(&mut client, failing_mixed).await.unwrap_err();
+        assert!(matches!(rollback_err, LucidError::DatabaseError { ref code, .. } if code == "23505"));
+
+        // DB state untouched
+        let rows_check = client
+            .query(&format!(r#"SELECT id, email FROM "{}"."{}" ORDER BY id"#, schema, table), &[])
+            .await
+            .unwrap();
+        assert_eq!(rows_check.len(), 2);
+        assert_eq!(rows_check[1].get::<_, String>(1), "keep@example.com");
+
+        // Mixed batch valid deterministic execution:
+        // Phase 1 Delete id=1 frees 'old@example.com', Phase 2 Update id=2 -> 'mid@example.com',
+        // Phase 3 Insert id=3 reuses 'old@example.com' cleanly!
+        let valid_mixed = BatchMutationRequest {
+            schema_name: schema.into(),
+            table_name: table.into(),
+            deletes: vec![RowDelete {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(1)],
+                original_xmin: xmin1,
+            }],
+            mutations: vec![RowMutation {
+                primary_key_columns: vec!["id".into()],
+                primary_key_values: vec![CellValue::Integer(2)],
+                original_xmin: xmin2,
+                updated_columns: vec!["email".into()],
+                updated_values: vec![CellValue::Text("mid@example.com".into())],
+            }],
+            inserts: vec![RowInsert {
+                client_row_id: "reuse-email".into(),
+                columns: vec!["id".into(), "email".into()],
+                values: vec![CellValue::Integer(3), CellValue::Text("old@example.com".into())],
+            }],
+        };
+        let ok_res = execute_batch_mutation(&mut client, valid_mixed).await.unwrap();
+        assert_eq!(ok_res.deleted_count, 1);
+        assert_eq!(ok_res.updated_count, 1);
+        assert_eq!(ok_res.inserted_count, 1);
+        assert_eq!(ok_res.rows_affected, 3);
+
+        let final_rows = client
+            .query(&format!(r#"SELECT id, email FROM "{}"."{}" ORDER BY id"#, schema, table), &[])
+            .await
+            .unwrap();
+        assert_eq!(final_rows.len(), 2);
+        assert_eq!(final_rows[0].get::<_, i32>(0), 2);
+        assert_eq!(final_rows[0].get::<_, String>(1), "mid@example.com");
+        assert_eq!(final_rows[1].get::<_, i32>(0), 3);
+        assert_eq!(final_rows[1].get::<_, String>(1), "old@example.com");
 
         let _ = client
             .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))

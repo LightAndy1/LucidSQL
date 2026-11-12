@@ -28,9 +28,12 @@ public struct TableDataContainerView: View {
 
                     Text(viewModel.currentTable)
                         .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
 
                     Text(viewModel.currentSchema)
                         .font(.system(size: 11))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -43,6 +46,8 @@ public struct TableDataContainerView: View {
                             Text("System (Read-Only)")
                                 .font(.system(size: 9, weight: .medium))
                         }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -55,6 +60,8 @@ public struct TableDataContainerView: View {
                             Text("PK")
                                 .font(.system(size: 9, weight: .bold))
                         }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -66,6 +73,8 @@ public struct TableDataContainerView: View {
                             Text("No PK (Read-Only)")
                                 .font(.system(size: 9, weight: .medium))
                         }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -83,6 +92,8 @@ public struct TableDataContainerView: View {
                                 Text(viewModel.isReadOnly ? "Read-Only" : "Read-Write")
                                     .font(.system(size: 9, weight: .medium))
                             }
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
                             .background(viewModel.isReadOnly ? Color.orange.opacity(0.15) : Color.secondary.opacity(0.1), in: Capsule())
@@ -99,6 +110,8 @@ public struct TableDataContainerView: View {
                             Text("Read-Only")
                                 .font(.system(size: 9, weight: .medium))
                         }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -108,20 +121,63 @@ public struct TableDataContainerView: View {
 
                 Spacer()
 
+                // Row Add / Delete Controls
+                if viewModel.isEditable && !viewModel.columns.isEmpty {
+                    HStack(spacing: 5) {
+                        Button {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.addDraftRow()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Add Row")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(viewModel.isLoading || viewModel.isApplying)
+                        .help("Add a new local draft row (not written until Apply)")
+
+                        let selectedIsPendingDelete = viewModel.selectedRowIndex.map { viewModel.isRowStagedForDeletion($0) } ?? false
+                        let canDeleteSelected = viewModel.selectedRowIndex.map { viewModel.canDeleteRow($0) } ?? false
+
+                        Button {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.toggleDeleteSelectedRow()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: selectedIsPendingDelete ? "arrow.uturn.backward" : "trash")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text(selectedIsPendingDelete ? "Undo Delete" : "Delete")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!canDeleteSelected || viewModel.isLoading || viewModel.isApplying)
+                        .help(selectedIsPendingDelete
+                            ? "Un-stage deletion for the selected row"
+                            : "Stage selected persisted row for deletion, or remove selected draft row")
+                    }
+                }
+
                 // Staged Changes Actions
-                if !viewModel.stagedEdits.isEmpty {
+                if viewModel.hasPendingChanges {
                     HStack(spacing: 6) {
                         SecondaryActionButton(
-                            title: "Discard (\(viewModel.stagedEdits.count))",
+                            title: "Discard (\(viewModel.totalStagedOperationsCount))",
                             icon: "arrow.uturn.backward",
                             size: .small
                         ) {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
                             viewModel.discardChanges()
                         }
-                        .help("Discard all staged edits for this table")
+                        .help("Discard all staged inserts, edits, and deletions for this table")
 
                         PrimaryActionButton(
-                            title: "Apply (\(viewModel.stagedEdits.count))",
+                            title: "Apply (\(viewModel.totalStagedOperationsCount))",
                             icon: "checkmark",
                             size: .small
                         ) {
@@ -129,7 +185,7 @@ public struct TableDataContainerView: View {
                             viewModel.showingReviewSheet = true
                         }
                         .disabled(viewModel.isReadOnly || viewModel.isSystemSchema || viewModel.isApplying)
-                        .help("Review and atomically apply staged edits")
+                        .help("Review and atomically apply staged changes")
                     }
                     .padding(.trailing, 4)
                 }
@@ -244,7 +300,7 @@ public struct TableDataContainerView: View {
             }
 
             // Grid View or Empty State - stable readable surface
-            if viewModel.rows.isEmpty && !viewModel.isLoading {
+            if viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty && !viewModel.isLoading {
                 VStack(spacing: 12) {
                     Spacer()
                     ZStack {
@@ -258,6 +314,16 @@ public struct TableDataContainerView: View {
                     Text("No records found in \(viewModel.currentTable)")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
+                    if viewModel.isEditable && !viewModel.columns.isEmpty {
+                        Button {
+                            viewModel.addDraftRow()
+                        } label: {
+                            Label("Add Row", systemImage: "plus")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -272,16 +338,19 @@ public struct TableDataContainerView: View {
 
             // Footer Status Bar
             HStack {
-                Text("\(viewModel.rows.count) rows fetched in \(viewModel.executionDurationMs) ms (\(viewModel.columns.count) columns)")
+                let draftNote = viewModel.stagedInserts.isEmpty ? "" : " + \(viewModel.stagedInserts.count) draft"
+                Text("\(viewModel.rows.count) rows fetched\(draftNote) in \(viewModel.executionDurationMs) ms (\(viewModel.columns.count) columns)")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
                 if viewModel.isEditable {
-                    Text("Double-click or Enter to edit • ⎋ to cancel • ⌥⌘N for NULL")
+                    Text("Double-click or Enter to edit • Tab to advance • ⎋ to cancel • ⌥⌘N for NULL • Right-click for row menu")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 } else if let reason = viewModel.nonEditableReason {
                     Text(reason)
                         .font(.system(size: 10))
@@ -292,12 +361,12 @@ public struct TableDataContainerView: View {
 
                 Spacer()
 
-                if !viewModel.stagedEdits.isEmpty {
+                if viewModel.hasPendingChanges {
                     HStack(spacing: 4) {
                         Circle()
                             .fill(Color.orange)
                             .frame(width: 6, height: 6)
-                        Text("\(viewModel.stagedEdits.count) staged changes")
+                        Text(viewModel.stagedSummaryText)
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.orange)
                     }
@@ -318,7 +387,7 @@ public struct TableDataContainerView: View {
                 viewModel.cancelNavigation()
             }
         } message: {
-            Text("You have \(viewModel.stagedEdits.count) unsaved edit\(viewModel.stagedEdits.count == 1 ? "" : "s") in \(viewModel.currentTable). Discard changes to proceed, or cancel to stay on this view?")
+            Text("You have \(viewModel.totalStagedOperationsCount) unsaved change\(viewModel.totalStagedOperationsCount == 1 ? "" : "s") (\(viewModel.stagedSummaryText)) in \(viewModel.currentTable). Discard changes to proceed, or cancel to stay on this view?")
         }
     }
 

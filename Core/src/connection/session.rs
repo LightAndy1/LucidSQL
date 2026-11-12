@@ -360,6 +360,8 @@ pub async fn execute_session_script(
                     is_nullable: true,
                     default_value: None,
                     is_generated: false,
+                    is_identity: false,
+                    is_identity_always: false,
                 });
             }
 

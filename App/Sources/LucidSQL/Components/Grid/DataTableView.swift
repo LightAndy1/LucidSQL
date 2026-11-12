@@ -23,6 +23,11 @@ public struct DataTableView: NSViewRepresentable {
         tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.rowHeight = 26
 
+        tableView.onSelectionChanged = { [weak coordinator = context.coordinator] row in
+            guard let coord = coordinator else { return }
+            coord.viewModel.selectedRowIndex = (row >= 0 && row < coord.viewModel.totalGridRowCount) ? row : nil
+        }
+
         tableView.onBeginEditCell = { [weak coordinator = context.coordinator, weak tableView] row, col in
             guard let coord = coordinator, let tv = tableView else { return }
             coord.beginEditingCell(tableView: tv, row: row, tableColumnIndex: col)
@@ -33,6 +38,25 @@ public struct DataTableView: NSViewRepresentable {
             let colIndex = col - 1
             guard row >= 0, colIndex >= 0, coord.viewModel.canSetNull(row: row, column: colIndex) else { return }
             coord.viewModel.stageNullEdit(row: row, column: colIndex)
+            coord.syncSnapshot(from: coord.viewModel)
+            tv.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: col))
+        }
+
+        tableView.onSetEmptyStringForCell = { [weak coordinator = context.coordinator, weak tableView] row, col in
+            guard let coord = coordinator, let tv = tableView else { return }
+            let colIndex = col - 1
+            guard row >= 0, colIndex >= 0 else { return }
+            coord.viewModel.stageEmptyStringEdit(row: row, column: colIndex)
+            coord.syncSnapshot(from: coord.viewModel)
+            tv.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: col))
+        }
+
+        tableView.onUseDefaultForCell = { [weak coordinator = context.coordinator, weak tableView] row, col in
+            guard let coord = coordinator, let tv = tableView else { return }
+            let colIndex = col - 1
+            guard row >= 0, colIndex >= 0, coord.viewModel.canUseDefault(row: row, column: colIndex) else { return }
+            coord.viewModel.revertDraftCellToDefault(row: row, column: colIndex)
+            coord.syncSnapshot(from: coord.viewModel)
             tv.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: col))
         }
 
@@ -41,7 +65,19 @@ public struct DataTableView: NSViewRepresentable {
             let colIndex = col - 1
             guard row >= 0, colIndex >= 0 else { return }
             coord.viewModel.discardEdit(row: row, column: colIndex)
+            coord.syncSnapshot(from: coord.viewModel)
             tv.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: col))
+        }
+
+        tableView.onToggleDeleteRow = { [weak coordinator = context.coordinator, weak tableView] row in
+            guard let coord = coordinator, let tv = tableView else { return }
+            if coord.viewModel.isRowStagedForDeletion(row) {
+                coord.viewModel.unstageDeleteRow(row: row)
+            } else {
+                coord.viewModel.stageDeleteRow(row: row)
+            }
+            coord.syncSnapshot(from: coord.viewModel)
+            tv.reloadData()
         }
 
         tableView.canEditCell = { [weak coordinator = context.coordinator] row, col in
@@ -56,10 +92,36 @@ public struct DataTableView: NSViewRepresentable {
             return coord.viewModel.canSetNull(row: row, column: colIndex)
         }
 
+        tableView.canSetEmptyStringAtCell = { [weak coordinator = context.coordinator] row, col in
+            guard let coord = coordinator else { return false }
+            let colIndex = col - 1
+            guard colIndex >= 0, colIndex < coord.viewModel.columns.count else { return false }
+            return coord.viewModel.isCellEditable(row: row, column: colIndex)
+                && coord.viewModel.isColumnTextLike(coord.viewModel.columns[colIndex])
+        }
+
+        tableView.canUseDefaultAtCell = { [weak coordinator = context.coordinator] row, col in
+            guard let coord = coordinator else { return false }
+            let colIndex = col - 1
+            return coord.viewModel.canUseDefault(row: row, column: colIndex)
+        }
+
         tableView.hasDirtyEditAtCell = { [weak coordinator = context.coordinator] row, col in
             guard let coord = coordinator else { return false }
             let colIndex = col - 1
             return coord.viewModel.stagedEdits[TableDataViewModel.GridCoordinate(row: row, column: colIndex)] != nil
+        }
+
+        tableView.isDraftRowHandler = { [weak coordinator = context.coordinator] row in
+            coordinator?.viewModel.isDraftRow(row) ?? false
+        }
+
+        tableView.canDeleteRowHandler = { [weak coordinator = context.coordinator] row in
+            coordinator?.viewModel.canDeleteRow(row) ?? false
+        }
+
+        tableView.isRowStagedForDeletionHandler = { [weak coordinator = context.coordinator] row in
+            coordinator?.viewModel.isRowStagedForDeletion(row) ?? false
         }
 
         scrollView.documentView = tableView
@@ -87,15 +149,27 @@ public struct DataTableView: NSViewRepresentable {
 
             tableView.reloadData()
 
-            if prevRow >= 0 && prevRow < viewModel.rows.count && prevCol >= 1 && prevCol < tableView.numberOfColumns {
+            if let pending = viewModel.pendingActiveCell,
+               pending.row >= 0, pending.row < viewModel.totalGridRowCount,
+               pending.column >= 1, pending.column < tableView.numberOfColumns {
+                viewModel.pendingActiveCell = nil
+                tableView.activeRow = pending.row
+                tableView.activeColumn = pending.column
+                tableView.selectRowIndexes(IndexSet(integer: pending.row), byExtendingSelection: false)
+                tableView.scrollRowToVisible(pending.row)
+                tableView.scrollColumnToVisible(pending.column)
+                viewModel.selectedRowIndex = pending.row
+            } else if prevRow >= 0 && prevRow < viewModel.totalGridRowCount && prevCol >= 1 && prevCol < tableView.numberOfColumns {
                 tableView.activeRow = prevRow
                 tableView.activeColumn = prevCol
                 if tableView.selectedRow != prevRow {
                     tableView.selectRowIndexes(IndexSet(integer: prevRow), byExtendingSelection: false)
                 }
+                viewModel.selectedRowIndex = prevRow
             } else {
                 tableView.activeRow = -1
                 tableView.activeColumn = -1
+                viewModel.selectedRowIndex = nil
             }
         }
     }
@@ -114,41 +188,63 @@ public struct DataTableView: NSViewRepresentable {
         private var lastOffset: UInt64 = 0
         private var lastDurationMs: UInt64 = 0
         private var lastStagedEdits: [TableDataViewModel.GridCoordinate: CellValue] = [:]
+        private var lastStagedInserts: [TableDataViewModel.StagedInsertRow] = []
+        private var lastStagedDeletes: Set<Int> = []
         private var lastIsEditable: Bool = false
 
         init(viewModel: TableDataViewModel) {
             self.viewModel = viewModel
         }
 
+        func syncSnapshot(from vm: TableDataViewModel) {
+            lastStagedEdits = vm.stagedEdits
+            lastStagedInserts = vm.stagedInserts
+            lastStagedDeletes = vm.stagedDeletes
+            lastDataVersion = vm.dataVersion
+            lastRowCount = vm.totalGridRowCount
+        }
+
         func hasStateChanged(viewModel: TableDataViewModel) -> Bool {
             let tableIdentity = "\(viewModel.currentSchema).\(viewModel.currentTable)"
             let changed = tableIdentity != lastTableIdentity
-                || viewModel.rows.count != lastRowCount
+                || viewModel.totalGridRowCount != lastRowCount
                 || viewModel.dataVersion != lastDataVersion
                 || viewModel.offset != lastOffset
                 || viewModel.executionDurationMs != lastDurationMs
                 || viewModel.stagedEdits != lastStagedEdits
+                || viewModel.stagedInserts != lastStagedInserts
+                || viewModel.stagedDeletes != lastStagedDeletes
                 || viewModel.isEditable != lastIsEditable
 
             if changed {
                 lastTableIdentity = tableIdentity
-                lastRowCount = viewModel.rows.count
+                lastRowCount = viewModel.totalGridRowCount
                 lastDataVersion = viewModel.dataVersion
                 lastOffset = viewModel.offset
                 lastDurationMs = viewModel.executionDurationMs
                 lastStagedEdits = viewModel.stagedEdits
+                lastStagedInserts = viewModel.stagedInserts
+                lastStagedDeletes = viewModel.stagedDeletes
                 lastIsEditable = viewModel.isEditable
             }
             return changed
         }
 
         public func numberOfRows(in tableView: NSTableView) -> Int {
-            viewModel.rows.count
+            viewModel.totalGridRowCount
+        }
+
+        public func tableViewSelectionDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? LucidDataTableView else { return }
+            let row = tv.selectedRow
+            viewModel.selectedRowIndex = (row >= 0 && row < viewModel.totalGridRowCount) ? row : nil
         }
 
         @discardableResult
         public func syncColumns(tableView: NSTableView, columns: [ColumnMetadata]) -> Bool {
-            let currentHash = columns.map { "\($0.name)_\($0.pgTypeName)_\($0.isPrimaryKey)_\($0.isGenerated)" }.joined().hashValue
+            let currentHash = columns.map {
+                "\($0.name)_\($0.pgTypeName)_\($0.isPrimaryKey)_\($0.isGenerated)_\($0.isIdentityAlways)"
+            }.joined().hashValue
             if currentHash == lastColumnHash && tableView.tableColumns.count == columns.count + 1 {
                 return false
             }
@@ -161,9 +257,9 @@ public struct DataTableView: NSViewRepresentable {
             // 1. Row Index Header Column
             let indexCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_index"))
             indexCol.title = "#"
-            indexCol.width = 44
-            indexCol.minWidth = 36
-            indexCol.maxWidth = 60
+            indexCol.width = 48
+            indexCol.minWidth = 40
+            indexCol.maxWidth = 68
             indexCol.headerCell.alignment = .center
             tableView.addTableColumn(indexCol)
 
@@ -171,7 +267,7 @@ public struct DataTableView: NSViewRepresentable {
             for (idx, col) in columns.enumerated() {
                 let colId = NSUserInterfaceItemIdentifier("col_\(idx)")
                 let tableCol = NSTableColumn(identifier: colId)
-                let pkPrefix = col.isPrimaryKey ? "🔑 " : (col.isGenerated ? "⚡ " : "")
+                let pkPrefix = col.isPrimaryKey ? "🔑 " : ((col.isGenerated || col.isIdentityAlways) ? "⚡ " : "")
                 tableCol.title = "\(pkPrefix)\(col.name)"
                 tableCol.width = max(110, CGFloat(col.name.count * 10 + 40))
                 tableCol.minWidth = 60
@@ -182,7 +278,7 @@ public struct DataTableView: NSViewRepresentable {
 
         public func beginEditingCell(tableView: LucidDataTableView, row: Int, tableColumnIndex: Int) {
             let colIndex = tableColumnIndex - 1
-            guard row >= 0, row < viewModel.rows.count, colIndex >= 0, colIndex < viewModel.columns.count else {
+            guard row >= 0, row < viewModel.totalGridRowCount, colIndex >= 0, colIndex < viewModel.columns.count else {
                 return
             }
             guard viewModel.isCellEditable(row: row, column: colIndex) else {
@@ -197,8 +293,43 @@ public struct DataTableView: NSViewRepresentable {
             }
         }
 
+        public func findNextEditableCoordinate(
+            fromRow: Int,
+            fromTableCol: Int,
+            direction: Int,
+            totalRows: Int,
+            totalTableCols: Int
+        ) -> (row: Int, tableCol: Int)? {
+            guard totalRows > 0, totalTableCols > 1 else { return nil }
+            let dataColCount = totalTableCols - 1
+            let maxSteps = totalRows * dataColCount
+            var curRow = fromRow
+            var curCol = fromTableCol
+
+            for _ in 0..<maxSteps {
+                curCol += direction
+                if curCol >= totalTableCols {
+                    curCol = 1
+                    curRow += 1
+                } else if curCol < 1 {
+                    curCol = totalTableCols - 1
+                    curRow -= 1
+                }
+                if curRow < 0 || curRow >= totalRows {
+                    return nil
+                }
+                if viewModel.isCellEditable(row: curRow, column: curCol - 1) {
+                    return (curRow, curCol)
+                }
+            }
+            return nil
+        }
+
         public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard let column = tableColumn, row < viewModel.rows.count else { return nil }
+            guard let column = tableColumn, row < viewModel.totalGridRowCount else { return nil }
+
+            let isDraft = viewModel.isDraftRow(row)
+            let isPendingDelete = viewModel.isRowStagedForDeletion(row)
 
             if column.identifier.rawValue == "col_index" {
                 let indexId = NSUserInterfaceItemIdentifier("IndexCell")
@@ -208,7 +339,6 @@ public struct DataTableView: NSViewRepresentable {
                     view.identifier = indexId
                     let label = NSTextField(labelWithString: "")
                     label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-                    label.textColor = NSColor.secondaryLabelColor
                     label.alignment = .center
                     label.translatesAutoresizingMaskIntoConstraints = false
                     view.addSubview(label)
@@ -220,7 +350,20 @@ public struct DataTableView: NSViewRepresentable {
                     ])
                     cellView = view
                 }
-                cellView?.textField?.stringValue = "\(viewModel.offset + UInt64(row) + 1)"
+                if isDraft {
+                    let draftNum = row - viewModel.rows.count + 1
+                    cellView?.textField?.stringValue = "+\(draftNum)"
+                    cellView?.textField?.textColor = NSColor.systemGreen
+                    cellView?.textField?.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+                } else if isPendingDelete {
+                    cellView?.textField?.stringValue = "DEL"
+                    cellView?.textField?.textColor = NSColor.systemRed
+                    cellView?.textField?.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+                } else {
+                    cellView?.textField?.stringValue = "\(viewModel.offset + UInt64(row) + 1)"
+                    cellView?.textField?.textColor = NSColor.secondaryLabelColor
+                    cellView?.textField?.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+                }
                 return cellView
             }
 
@@ -230,26 +373,10 @@ public struct DataTableView: NSViewRepresentable {
                 return nil
             }
 
-            let rowData = viewModel.rows[row]
-
-            // If the query returned hidden xmin as column 0, data columns start at 1 if has_pk
-            let hasPk = viewModel.hasPrimaryKey
-            let rawCellIndex = hasPk ? (colIndex + 1) : colIndex
-
-            let value: CellValue
-            if rawCellIndex < rowData.cells.count {
-                value = rowData.cells[rawCellIndex]
-            } else if colIndex < rowData.cells.count {
-                value = rowData.cells[colIndex]
-            } else {
-                value = .null
-            }
-
-            let coord = TableDataViewModel.GridCoordinate(row: row, column: colIndex)
-            let displayValue = viewModel.stagedEdits[coord] ?? value
-            let isDirty = viewModel.stagedEdits[coord] != nil
+            let state = viewModel.cellState(row: row, column: colIndex)
             let isCellEditable = viewModel.isCellEditable(row: row, column: colIndex)
             let canSetNull = viewModel.canSetNull(row: row, column: colIndex)
+            let isTextLike = viewModel.isColumnTextLike(viewModel.columns[colIndex])
 
             let lucidTable = tableView as? LucidDataTableView
             let tableColIndex = colIndex + 1
@@ -258,11 +385,15 @@ public struct DataTableView: NSViewRepresentable {
             let cellView = (tableView.makeView(withIdentifier: DataTableCellView.identifier, owner: self) as? DataTableCellView) ?? DataTableCellView()
             cellView.identifier = DataTableCellView.identifier
             cellView.configure(
-                value: displayValue,
-                isDirty: isDirty,
+                value: state.value,
+                isDefault: state.isDefault,
+                isDirty: state.isDirty,
                 isEditable: isCellEditable,
                 canSetNull: canSetNull,
-                isSelectedCell: isSelectedCell
+                isSelectedCell: isSelectedCell,
+                isDraftRow: isDraft,
+                isPendingDelete: isPendingDelete,
+                isTextLikeColumn: isTextLike
             )
 
             cellView.onEditingStateChanged = { [weak self] editing in
@@ -278,24 +409,32 @@ public struct DataTableView: NSViewRepresentable {
             cellView.onCommitEdit = { [weak self, weak tableView] newText in
                 guard let self = self else { return }
                 self.viewModel.stageTextEdit(row: row, column: colIndex, text: newText)
-                self.lastStagedEdits = self.viewModel.stagedEdits
+                self.syncSnapshot(from: self.viewModel)
                 tableView?.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: tableColIndex))
             }
 
             cellView.onSetNull = { [weak self, weak tableView] in
                 guard let self = self else { return }
                 self.viewModel.stageNullEdit(row: row, column: colIndex)
-                self.lastStagedEdits = self.viewModel.stagedEdits
+                self.syncSnapshot(from: self.viewModel)
                 tableView?.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: tableColIndex))
             }
 
             cellView.onTabAdvance = { [weak self, weak tableView] direction in
                 guard let self = self, let tv = tableView as? LucidDataTableView else { return }
-                tv.moveActiveCell(rowDelta: 0, colDelta: direction, wrapRows: true)
-                let nextRow = tv.activeRow
-                let nextCol = tv.activeColumn
-                DispatchQueue.main.async {
-                    self.beginEditingCell(tableView: tv, row: nextRow, tableColumnIndex: nextCol)
+                if let target = self.findNextEditableCoordinate(
+                    fromRow: row,
+                    fromTableCol: tableColIndex,
+                    direction: direction,
+                    totalRows: tv.numberOfRows,
+                    totalTableCols: tv.numberOfColumns
+                ) {
+                    tv.selectActiveCell(row: target.row, tableColumn: target.tableCol)
+                    DispatchQueue.main.async {
+                        self.beginEditingCell(tableView: tv, row: target.row, tableColumnIndex: target.tableCol)
+                    }
+                } else {
+                    tv.moveActiveCell(rowDelta: 0, colDelta: direction, wrapRows: true)
                 }
             }
 
@@ -305,12 +444,22 @@ public struct DataTableView: NSViewRepresentable {
 }
 
 public final class LucidDataTableView: NSTableView {
+    public var onSelectionChanged: ((Int) -> Void)?
     public var onBeginEditCell: ((Int, Int) -> Void)?
     public var onSetNullForCell: ((Int, Int) -> Void)?
+    public var onSetEmptyStringForCell: ((Int, Int) -> Void)?
+    public var onUseDefaultForCell: ((Int, Int) -> Void)?
     public var onDiscardCellEdit: ((Int, Int) -> Void)?
+    public var onToggleDeleteRow: ((Int) -> Void)?
+
     public var canEditCell: ((Int, Int) -> Bool)?
     public var canSetNullAtCell: ((Int, Int) -> Bool)?
+    public var canSetEmptyStringAtCell: ((Int, Int) -> Bool)?
+    public var canUseDefaultAtCell: ((Int, Int) -> Bool)?
     public var hasDirtyEditAtCell: ((Int, Int) -> Bool)?
+    public var isDraftRowHandler: ((Int) -> Bool)?
+    public var canDeleteRowHandler: ((Int) -> Bool)?
+    public var isRowStagedForDeletionHandler: ((Int) -> Bool)?
 
     public var activeRow: Int = -1
     public var activeColumn: Int = -1
@@ -320,6 +469,21 @@ public final class LucidDataTableView: NSTableView {
             return tf.isEditable
         }
         return super.validateProposedFirstResponder(responder, for: event)
+    }
+
+    public func selectActiveCell(row: Int, tableColumn: Int) {
+        guard row >= 0, row < numberOfRows, tableColumn >= 1, tableColumn < numberOfColumns else { return }
+        let prevRow = activeRow
+        let prevCol = activeColumn
+        activeRow = row
+        activeColumn = tableColumn
+        if selectedRow != row {
+            selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        scrollRowToVisible(row)
+        scrollColumnToVisible(tableColumn)
+        reloadCellSelection(prevRow: prevRow, prevCol: prevCol)
+        onSelectionChanged?(row)
     }
 
     public override func mouseDown(with event: NSEvent) {
@@ -340,6 +504,7 @@ public final class LucidDataTableView: NSTableView {
             activeColumn = -1
         }
 
+        onSelectionChanged?(activeRow)
         reloadCellSelection(prevRow: prevRow, prevCol: prevCol)
 
         if event.clickCount == 2 && activeRow >= 0 && activeColumn >= 1 {
@@ -435,6 +600,7 @@ public final class LucidDataTableView: NSTableView {
         }
         scrollRowToVisible(nextRow)
         scrollColumnToVisible(nextCol)
+        onSelectionChanged?(nextRow)
         reloadCellSelection(prevRow: prevRow, prevCol: prevCol)
     }
 
@@ -459,21 +625,31 @@ public final class LucidDataTableView: NSTableView {
         let point = convert(event.locationInWindow, from: nil)
         let clickedRow = row(at: point)
         let clickedCol = column(at: point)
-        guard clickedRow >= 0, clickedCol >= 1 else { return nil }
+        guard clickedRow >= 0, clickedRow < numberOfRows else { return nil }
+
+        let effectiveCol = clickedCol >= 1 ? clickedCol : (numberOfColumns > 1 ? 1 : -1)
+        guard effectiveCol >= 1 else { return nil }
 
         let prevRow = activeRow
         let prevCol = activeColumn
         activeRow = clickedRow
-        activeColumn = clickedCol
+        activeColumn = effectiveCol
         if selectedRow != clickedRow {
             selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
         }
+        onSelectionChanged?(clickedRow)
         reloadCellSelection(prevRow: prevRow, prevCol: prevCol)
 
-        let editable = canEditCell?(clickedRow, clickedCol) ?? false
-        let allowNull = canSetNullAtCell?(clickedRow, clickedCol) ?? false
-        let isDirty = hasDirtyEditAtCell?(clickedRow, clickedCol) ?? false
-        guard editable || isDirty else { return nil }
+        let editable = canEditCell?(clickedRow, effectiveCol) ?? false
+        let allowNull = canSetNullAtCell?(clickedRow, effectiveCol) ?? false
+        let allowEmpty = canSetEmptyStringAtCell?(clickedRow, effectiveCol) ?? false
+        let allowDefault = canUseDefaultAtCell?(clickedRow, effectiveCol) ?? false
+        let isDirty = hasDirtyEditAtCell?(clickedRow, effectiveCol) ?? false
+        let isDraft = isDraftRowHandler?(clickedRow) ?? false
+        let canDelete = canDeleteRowHandler?(clickedRow) ?? false
+        let isPendingDelete = isRowStagedForDeletionHandler?(clickedRow) ?? false
+
+        guard editable || allowDefault || isDirty || canDelete || isPendingDelete else { return nil }
 
         let menu = NSMenu()
         if editable {
@@ -486,13 +662,44 @@ public final class LucidDataTableView: NSTableView {
                 nullItem.target = self
                 menu.addItem(nullItem)
             }
+
+            if allowEmpty {
+                let emptyItem = NSMenuItem(title: "Set to Empty String (\"\")", action: #selector(contextSetEmptyString(_:)), keyEquivalent: "")
+                emptyItem.target = self
+                menu.addItem(emptyItem)
+            }
         }
-        if isDirty {
+
+        if allowDefault {
+            let defaultItem = NSMenuItem(title: "Use DEFAULT", action: #selector(contextUseDefault(_:)), keyEquivalent: "")
+            defaultItem.target = self
+            menu.addItem(defaultItem)
+        }
+
+        if isDirty && !isDraft {
             let discardItem = NSMenuItem(title: "Discard Cell Edit", action: #selector(contextDiscardCell(_:)), keyEquivalent: "")
             discardItem.target = self
             menu.addItem(discardItem)
         }
-        return menu
+
+        if canDelete || isPendingDelete {
+            if !menu.items.isEmpty {
+                menu.addItem(NSMenuItem.separator())
+            }
+            let title: String
+            if isDraft {
+                title = "Delete Draft Row"
+            } else if isPendingDelete {
+                title = "Undo Delete Row"
+            } else {
+                title = "Stage Row for Deletion"
+            }
+            let deleteItem = NSMenuItem(title: title, action: #selector(contextToggleDeleteRow(_:)), keyEquivalent: "")
+            deleteItem.target = self
+            menu.addItem(deleteItem)
+        }
+
+        return menu.items.isEmpty ? nil : menu
     }
 
     @objc private func contextEditCell(_ sender: Any?) {
@@ -505,8 +712,23 @@ public final class LucidDataTableView: NSTableView {
         onSetNullForCell?(activeRow, activeColumn)
     }
 
+    @objc private func contextSetEmptyString(_ sender: Any?) {
+        guard activeRow >= 0, activeColumn >= 1 else { return }
+        onSetEmptyStringForCell?(activeRow, activeColumn)
+    }
+
+    @objc private func contextUseDefault(_ sender: Any?) {
+        guard activeRow >= 0, activeColumn >= 1 else { return }
+        onUseDefaultForCell?(activeRow, activeColumn)
+    }
+
     @objc private func contextDiscardCell(_ sender: Any?) {
         guard activeRow >= 0, activeColumn >= 1 else { return }
         onDiscardCellEdit?(activeRow, activeColumn)
+    }
+
+    @objc private func contextToggleDeleteRow(_ sender: Any?) {
+        guard activeRow >= 0 else { return }
+        onToggleDeleteRow?(activeRow)
     }
 }

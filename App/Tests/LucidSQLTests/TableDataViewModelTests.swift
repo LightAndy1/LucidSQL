@@ -38,10 +38,10 @@ struct TableDataViewModelTests {
 
         // Mock column so isEditable passes
         vm.columns = [
-            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "col1", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "col2", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "col3", ordinalPosition: 4, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false),
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "col1", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "col2", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "col3", ordinalPosition: 4, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
         ]
 
         vm.setCellValue(row: 2, column: 3, value: .text("updated_value"))
@@ -343,9 +343,9 @@ struct TableDataViewModelTests {
         vm.currentSchema = "user_schema"
         vm.currentTable = "weird_table"
         vm.columns = [
-            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "oid", pgTypeOid: 26, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "extra", ordinalPosition: 3, pgTypeName: "int2vector", pgTypeOid: 22, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "oid", pgTypeOid: 26, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "extra", ordinalPosition: 3, pgTypeName: "int2vector", pgTypeOid: 22, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
         ]
         vm.rows = [
             RowData(cells: [.text("100"), .unsupported("oid"), .text("ok"), .unsupported("int2vector")]),
@@ -390,8 +390,8 @@ struct TableDataViewModelTests {
     @Test("Verify parseCellValue does not misclassify point/interval as integer")
     func testParseCellValueTypeMatching() {
         let vm = TableDataViewModel()
-        let pointCol = ColumnMetadata(name: "loc", ordinalPosition: 1, pgTypeName: "point", pgTypeOid: 600, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
-        let intCol = ColumnMetadata(name: "cnt", ordinalPosition: 2, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
+        let pointCol = ColumnMetadata(name: "loc", ordinalPosition: 1, pgTypeName: "point", pgTypeOid: 600, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
+        let intCol = ColumnMetadata(name: "cnt", ordinalPosition: 2, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
 
         #expect(vm.parseCellValue(text: "123", column: pointCol) == .text("123"))
         #expect(vm.parseCellValue(text: "123", column: intCol) == .integer(123))
@@ -470,8 +470,8 @@ struct TableDataViewModelTests {
         vm.currentSchema = "public"
         vm.currentTable = "items"
         vm.columns = [
-            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
         ]
         vm.rows = [
             RowData(cells: [.text("100"), .integer(1), .text("Alpha")])
@@ -518,9 +518,9 @@ struct TableDataViewModelTests {
         vm.currentSchema = "public"
         vm.currentTable = "items"
         vm.columns = [
-            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "title", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "note", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "title", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "note", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
         ]
         vm.rows = [
             RowData(cells: [.text("100"), .integer(1), .text("Req"), .text("Opt")])
@@ -565,8 +565,8 @@ struct TableDataViewModelTests {
         vm.currentSchema = "public"
         vm.currentTable = "items"
         vm.columns = [
-            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false),
-            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false)
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "label", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false)
         ]
         vm.rows = [RowData(cells: [.text("100"), .integer(1), .text("Alpha")])]
         vm.executionDurationMs = 0
@@ -579,5 +579,171 @@ struct TableDataViewModelTests {
         vm.rows = [RowData(cells: [.text("101"), .integer(1), .text("ExternalUpdate")])]
         vm.notifyRowsUpdated()
         #expect(coord.hasStateChanged(viewModel: vm) == true)
+    }
+
+    @Test("Verify draft row staging, DEFAULT vs NULL vs empty string, validation, and draft discard")
+    @MainActor
+    func testDraftRowStagingDefaultsAndValidation() {
+        let vm = TableDataViewModel()
+        vm.currentSchema = "public"
+        vm.currentTable = "items"
+        vm.columns = [
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: true, isIdentityAlways: true),
+            ColumnMetadata(name: "required_col", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "default_note", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: "'def'::text", isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "computed", ordinalPosition: 4, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: true, isIdentity: false, isIdentityAlways: false),
+        ]
+
+        let draftRow = vm.addDraftRow()
+        #expect(draftRow == 0)
+        #expect(vm.hasPendingChanges == true)
+        #expect(vm.stagedInserts.count == 1)
+        #expect(vm.totalGridRowCount == 1)
+
+        // GENERATED ALWAYS AS IDENTITY and GENERATED ALWAYS AS (...) are read-only in drafts
+        #expect(vm.isCellEditable(row: 0, column: 0) == false)
+        #expect(vm.isCellEditable(row: 0, column: 1) == true)
+        #expect(vm.isCellEditable(row: 0, column: 2) == true)
+        #expect(vm.isCellEditable(row: 0, column: 3) == false)
+
+        // Required column missing triggers validation issue before Apply
+        #expect(vm.draftValidationIssues.count == 1)
+        #expect(vm.draftValidationIssues[0].contains("required_col"))
+
+        // Navigation guard must prompt when only inserts are staged
+        var navigated = false
+        vm.safeNavigate { navigated = true }
+        #expect(navigated == false)
+        #expect(vm.showingUnsavedChangesAlert == true)
+        vm.cancelNavigation()
+
+        // Distinguish empty string "" vs NULL vs DEFAULT on text columns
+        vm.stageEmptyStringEdit(row: 0, column: 1) // required_col = ""
+        #expect(vm.draftValidationIssues.isEmpty)
+
+        vm.stageNullEdit(row: 0, column: 2) // default_note = explicit NULL
+        var state = vm.cellState(row: 0, column: 2)
+        #expect(state.isDefault == false)
+        #expect(state.value == .null)
+
+        vm.revertDraftCellToDefault(row: 0, column: 2) // back to DEFAULT
+        state = vm.cellState(row: 0, column: 2)
+        #expect(state.isDefault == true)
+
+        // Deleting an unsaved draft row removes it cleanly without staging a DB delete
+        vm.stageDeleteRow(row: 0)
+        #expect(vm.stagedInserts.isEmpty)
+        #expect(vm.stagedDeletes.isEmpty)
+        #expect(vm.hasPendingChanges == false)
+    }
+
+    @Test("Verify live PostgreSQL Add Row, Delete, Undo Delete, and Mixed-Batch Atomic Rollback")
+    func testLiveInsertDeleteMixedBatchAndRollback() async throws {
+        let config = getLocalConfig()
+        let schema = "lucid_swift_insdel_\(Int.random(in: 1000...9999))"
+        let table = "records"
+
+        let setupSql = """
+        DROP SCHEMA IF EXISTS \(schema) CASCADE;
+        CREATE SCHEMA \(schema);
+        CREATE TABLE \(schema).\(table) (
+            id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            code text NOT NULL UNIQUE,
+            status text DEFAULT 'pending',
+            note text DEFAULT 'auto-note',
+            doubled_code text GENERATED ALWAYS AS (code || '!') STORED
+        );
+        INSERT INTO \(schema).\(table) (code, status, note) VALUES ('A1', 'active', 'seed1'), ('B2', 'active', 'seed2');
+        """
+        _ = try await execute_session_query(config: config, sessionId: "setup_insdel", sql: setupSql, queryId: UUID().uuidString)
+
+        let vm = TableDataViewModel()
+        await vm.loadTable(config: config, schema: schema, table: table)
+        #expect(vm.rows.count == 2)
+        #expect(vm.columns[0].isIdentity == true)
+        #expect(vm.columns[0].isIdentityAlways == true)
+
+        // Stage: 1 delete (row 0), 1 undo then keep row 1 deleted? No: test undo on row 0, delete row 1, insert draft with DEFAULT status, explicit NULL note, "" code? Use distinct code
+        vm.stageDeleteRow(row: 0)
+        #expect(vm.stagedDeletes.contains(0))
+        #expect(vm.isCellEditable(row: 0, column: 1) == false) // pending delete row cannot be edited
+        vm.unstageDeleteRow(row: 0)
+        #expect(vm.stagedDeletes.isEmpty)
+        #expect(vm.isCellEditable(row: 0, column: 1) == true)
+
+        // Stage delete of row 1 (B2), update row 0 (A1), and insert draft row reusing B2 and testing NULL vs "" vs DEFAULT
+        vm.stageDeleteRow(row: 1)
+        vm.stageTextEdit(row: 0, column: 2, text: "updated")
+
+        let draftIdx = vm.addDraftRow()!
+        // code = "", status = left DEFAULT ('pending'), note = explicit NULL (overrides 'auto-note')
+        vm.stageEmptyStringEdit(row: draftIdx, column: 1)
+        vm.stageNullEdit(row: draftIdx, column: 3)
+
+        #expect(vm.stagedDeleteItems.count == 1)
+        #expect(vm.stagedDiffs.count == 1)
+        #expect(vm.stagedInsertItems.count == 1)
+
+        await vm.applyStagedEdits(config: config)
+        #expect(vm.errorMessage == nil)
+        #expect(!vm.hasPendingChanges)
+        #expect(vm.rows.count == 2) // A1 updated + new draft id=3
+
+        // Verify newly inserted row refreshed with DB-generated PK (id=3), DEFAULT 'pending', NULL note, and STORED generated '!'
+        let insertedRow = vm.rows.first(where: { $0.cells[1] == .integer(3) })
+        #expect(insertedRow != nil)
+        #expect(insertedRow?.cells[2] == .text(""))
+        #expect(insertedRow?.cells[3] == .text("pending"))
+        #expect(insertedRow?.cells[4] == .null)
+        #expect(insertedRow?.cells[5] == .text("!"))
+
+        // Now verify failed mixed batch rolls back ALL operations and preserves staged work in ViewModel
+        vm.stageDeleteRow(row: 1) // delete id=3
+        vm.stageTextEdit(row: 0, column: 2, text: "should_rollback")
+        let failDraft = vm.addDraftRow()!
+        vm.stageTextEdit(row: failDraft, column: 1, text: "A1") // collides with row 0's UNIQUE code 'A1'!
+        await vm.applyStagedEdits(config: config)
+
+        #expect(vm.errorMessage != nil)
+        #expect(vm.errorMessage?.contains("23505") == true)
+        #expect(vm.stagedDeletes.count == 1)
+        #expect(vm.stagedEdits.count == 1)
+        #expect(vm.stagedInserts.count == 1)
+
+        // Verify Read-Only rejection
+        vm.discardChanges()
+        vm.isReadOnly = true
+        #expect(vm.addDraftRow() == nil)
+        #expect(vm.canDeleteRow(0) == false)
+
+        _ = try? await execute_session_query(config: config, sessionId: "cleanup_insdel", sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
+    }
+
+    @Test("Verify Coordinator Tab/Shift+Tab helper skips non-editable generated columns and pending-delete rows")
+    @MainActor
+    func testTabNavigationSkipsNonEditableAndDeletedRows() {
+        let vm = TableDataViewModel()
+        vm.currentSchema = "public"
+        vm.currentTable = "t"
+        vm.columns = [
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: true, isIdentityAlways: true),
+            ColumnMetadata(name: "name", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "gen", ordinalPosition: 3, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: true, defaultValue: nil, isGenerated: true, isIdentity: false, isIdentityAlways: false),
+        ]
+        vm.rows = [
+            RowData(cells: [.text("10"), .integer(1), .text("Row1"), .text("Row1!")]),
+            RowData(cells: [.text("11"), .integer(2), .text("Row2"), .text("Row2!")]),
+            RowData(cells: [.text("12"), .integer(3), .text("Row3"), .text("Row3!")]),
+        ]
+        vm.stageDeleteRow(row: 1) // Row 1 marked for deletion
+
+        let coord = DataTableView(viewModel: vm).makeCoordinator()
+        // From (row 0, col 2 'name'): Tab forward skips col 3 'gen', skips deleted row 1, skips col 1 'id' (identity always), lands on (row 2, col 2 'name') -> tableColumn 2
+        let forward = coord.findNextEditableCoordinate(fromRow: 0, fromTableCol: 2, direction: 1, totalRows: 3, totalTableCols: 4)
+        #expect(forward?.row == 2 && forward?.tableCol == 2)
+
+        // Shift+Tab backward from (row 2, col 2) skips back to (row 0, col 2)
+        let backward = coord.findNextEditableCoordinate(fromRow: 2, fromTableCol: 2, direction: -1, totalRows: 3, totalTableCols: 4)
+        #expect(backward?.row == 0 && backward?.tableCol == 2)
     }
 }

@@ -25,4 +25,6 @@ pub struct ColumnMetadata {
     pub is_nullable: bool,
     pub default_value: Option<String>,
     pub is_generated: bool,
+    pub is_identity: bool,
+    pub is_identity_always: bool,
 }

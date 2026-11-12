@@ -62,7 +62,9 @@ pub async fn query_columns<C: GenericClient>(
             (pk.conkey IS NOT NULL AND a.attnum = ANY(pk.conkey)) as is_pk,
             NOT a.attnotnull as is_nullable,
             pg_get_expr(d.adbin, d.adrelid) as default_value,
-            COALESCE(a.attgenerated, '') != '' as is_generated
+            COALESCE(a.attgenerated, '') != '' as is_generated,
+            a.attidentity IN ('a', 'd') as is_identity,
+            a.attidentity = 'a' as is_identity_always
         FROM pg_attribute a
         JOIN pg_class c ON c.oid = a.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -88,6 +90,8 @@ pub async fn query_columns<C: GenericClient>(
             is_nullable: row.get(5),
             default_value: row.get(6),
             is_generated: row.get(7),
+            is_identity: row.get(8),
+            is_identity_always: row.get(9),
         });
     }
     Ok(columns)

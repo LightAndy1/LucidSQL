@@ -11,6 +11,9 @@ extension QueryResult: @unchecked Sendable {}
 extension SessionInfo: @unchecked Sendable {}
 extension TransactionStatus: @unchecked Sendable {}
 extension RowMutation: @unchecked Sendable {}
+extension RowInsert: @unchecked Sendable {}
+extension RowDelete: @unchecked Sendable {}
+extension InsertedRowResult: @unchecked Sendable {}
 extension BatchMutationRequest: @unchecked Sendable {}
 extension BatchMutationResult: @unchecked Sendable {}
 

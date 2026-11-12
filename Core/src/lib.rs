@@ -11,7 +11,9 @@ pub mod schema;
 
 pub use connection::{ConnectionConfig, SessionInfo, TransactionStatus};
 pub use error::LucidError;
-pub use mutation::{BatchMutationRequest, BatchMutationResult, RowMutation};
+pub use mutation::{
+    BatchMutationRequest, BatchMutationResult, InsertedRowResult, RowDelete, RowInsert, RowMutation,
+};
 pub use query::{CellValue, QueryResult, RecordPage, RowData};
 pub use schema::{ColumnMetadata, TableInfo};
 

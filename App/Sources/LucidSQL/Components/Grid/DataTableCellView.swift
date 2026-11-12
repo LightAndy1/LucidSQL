@@ -12,13 +12,18 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
 
     private var originalString: String = ""
     private var originalIsNull: Bool = false
+    private var originalIsDefault: Bool = false
     private var originalIsUnsupported: Bool = false
+    private var isTextLikeColumn: Bool = false
     private var isCellEditable: Bool = false
     private var canSetNull: Bool = false
+    private var isDraftRow: Bool = false
+    private var isPendingDelete: Bool = false
     private var isActivelyEditing: Bool = false
     private var isStartingEditing: Bool = false
     private var isCancelled: Bool = false
-    private var explicitCommit: Bool = false
+    private var didEditText: Bool = false
+    private var explicitEnterCommit: Bool = false
     private var pendingTabDirection: Int? = nil
     private let customTextField: CellTextField
 
@@ -73,13 +78,23 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
     }
 
     private func updateBackgroundAndBorder() {
-        layer?.backgroundColor = isDirty
-            ? NSColor.systemYellow.withAlphaComponent(0.25).cgColor
-            : NSColor.clear.cgColor
+        if isPendingDelete {
+            layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.16).cgColor
+        } else if isDirty {
+            layer?.backgroundColor = isDraftRow
+                ? NSColor.systemGreen.withAlphaComponent(0.16).cgColor
+                : NSColor.systemYellow.withAlphaComponent(0.25).cgColor
+        } else if isDraftRow {
+            layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.08).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
 
         if isSelectedCell && !isActivelyEditing {
             layer?.borderWidth = 1.5
-            layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
+            layer?.borderColor = (isPendingDelete
+                ? NSColor.systemRed
+                : NSColor.controlAccentColor).withAlphaComponent(0.85).cgColor
             layer?.cornerRadius = 3
         } else {
             layer?.borderWidth = 0
@@ -100,39 +115,72 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
     }
 
     private func restoreOriginalDisplay() {
-        if originalIsNull {
-            customTextField.stringValue = "NULL"
-            customTextField.textColor = NSColor.tertiaryLabelColor
-            customTextField.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let baseFont: NSFont
+        let baseColor: NSColor
+        let displayText: String
+
+        if originalIsDefault {
+            displayText = "DEFAULT"
+            baseColor = NSColor.systemIndigo.withAlphaComponent(0.8)
+            baseFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        } else if originalIsNull {
+            displayText = "NULL"
+            baseColor = NSColor.tertiaryLabelColor
+            baseFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
         } else if originalIsUnsupported {
-            customTextField.stringValue = originalString
-            customTextField.textColor = NSColor.tertiaryLabelColor
-            customTextField.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+            displayText = originalString
+            baseColor = NSColor.tertiaryLabelColor
+            baseFont = NSFont.systemFont(ofSize: 11, weight: .regular)
         } else {
-            customTextField.stringValue = originalString
-            customTextField.textColor = NSColor.labelColor
-            customTextField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            displayText = originalString
+            baseColor = isPendingDelete ? NSColor.systemRed.withAlphaComponent(0.9) : NSColor.labelColor
+            baseFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        }
+
+        customTextField.font = baseFont
+        customTextField.textColor = baseColor
+        if isPendingDelete && !displayText.isEmpty {
+            let attr = NSAttributedString(
+                string: displayText,
+                attributes: [
+                    .font: baseFont,
+                    .foregroundColor: baseColor,
+                    .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                ]
+            )
+            customTextField.attributedStringValue = attr
+        } else {
+            customTextField.stringValue = displayText
         }
     }
 
     public func configure(
         value: CellValue,
+        isDefault: Bool = false,
         isDirty: Bool = false,
         isEditable: Bool = true,
         canSetNull: Bool = true,
-        isSelectedCell: Bool = false
+        isSelectedCell: Bool = false,
+        isDraftRow: Bool = false,
+        isPendingDelete: Bool = false,
+        isTextLikeColumn: Bool = false
     ) {
         self.isCancelled = false
-        self.explicitCommit = false
+        self.didEditText = false
+        self.explicitEnterCommit = false
         self.pendingTabDirection = nil
-        self.originalIsNull = value.isNull
-        self.originalIsUnsupported = value.isUnsupported
-        self.isCellEditable = isEditable && !value.isUnsupported
+        self.originalIsDefault = isDefault
+        self.originalIsNull = !isDefault && value.isNull
+        self.originalIsUnsupported = !isDefault && value.isUnsupported
+        self.isTextLikeColumn = isTextLikeColumn
+        self.isDraftRow = isDraftRow
+        self.isPendingDelete = isPendingDelete
+        self.isCellEditable = isEditable && !originalIsUnsupported && !isPendingDelete
         self.canSetNull = canSetNull && self.isCellEditable
         self.isDirty = isDirty
         self.isSelectedCell = isSelectedCell
 
-        if value.isNull {
+        if originalIsDefault || originalIsNull {
             originalString = ""
         } else {
             originalString = value.displayString
@@ -140,7 +188,7 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
 
         endEditingVisualState()
         restoreOriginalDisplay()
-        toolTip = originalIsUnsupported ? originalString : nil
+        toolTip = originalIsUnsupported ? originalString : (isPendingDelete ? "Staged for deletion (undo before editing)" : nil)
     }
 
     public func beginEditing() {
@@ -148,7 +196,8 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
 
         isActivelyEditing = true
         isCancelled = false
-        explicitCommit = false
+        didEditText = false
+        explicitEnterCommit = false
         pendingTabDirection = nil
 
         customTextField.isEditable = true
@@ -159,7 +208,7 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         customTextField.backgroundColor = NSColor.textBackgroundColor
         customTextField.focusRingType = .default
 
-        if originalIsNull {
+        if originalIsNull || originalIsDefault {
             customTextField.stringValue = ""
             customTextField.textColor = NSColor.labelColor
             customTextField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -182,11 +231,15 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
 
     public func controlTextDidBeginEditing(_ obj: Notification) {
         isCancelled = false
-        if originalIsNull && customTextField.stringValue == "NULL" {
+        if (originalIsNull || originalIsDefault) && (customTextField.stringValue == "NULL" || customTextField.stringValue == "DEFAULT") {
             customTextField.stringValue = ""
             customTextField.textColor = NSColor.labelColor
             customTextField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         }
+    }
+
+    public func controlTextDidChange(_ obj: Notification) {
+        didEditText = true
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {
@@ -194,10 +247,12 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
             return
         }
         let wasCancelled = isCancelled
-        let wasExplicitCommit = explicitCommit
+        let wasExplicitEnter = explicitEnterCommit
+        let wasEdited = didEditText
         let tabDirection = pendingTabDirection
         pendingTabDirection = nil
-        explicitCommit = false
+        explicitEnterCommit = false
+        didEditText = false
 
         endEditingVisualState()
         onEditingStateChanged?(false)
@@ -208,11 +263,18 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         }
 
         let text = customTextField.stringValue
-        let shouldCommit = (text != originalString) || (originalIsNull && wasExplicitCommit)
+        let shouldCommit: Bool
+        if originalIsDefault {
+            shouldCommit = !text.isEmpty || wasEdited || (wasExplicitEnter && isTextLikeColumn)
+        } else if originalIsNull {
+            shouldCommit = !text.isEmpty || wasEdited || wasExplicitEnter
+        } else {
+            shouldCommit = (text != originalString)
+        }
 
         if shouldCommit {
             onCommitEdit?(text)
-        } else if originalIsNull {
+        } else if originalIsNull || originalIsDefault {
             restoreOriginalDisplay()
         }
 
@@ -232,20 +294,18 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         }
 
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            explicitCommit = true
+            explicitEnterCommit = true
             onRestoreFocusToTable?()
             return true
         }
 
         if commandSelector == #selector(NSResponder.insertTab(_:)) {
-            explicitCommit = true
             pendingTabDirection = 1
             onRestoreFocusToTable?()
             return true
         }
 
         if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
-            explicitCommit = true
             pendingTabDirection = -1
             onRestoreFocusToTable?()
             return true
