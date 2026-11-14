@@ -114,3 +114,57 @@ public struct SecondaryActionButton: View {
         }
     }
 }
+
+/// Applies consistent native Liquid Glass capsule styling for compact toolbar and banner controls.
+public struct ToolbarCapsuleControlStyleModifier: ViewModifier {
+    public let prominent: Bool
+    public let size: ControlSize
+
+    public init(prominent: Bool = false, size: ControlSize = .small) {
+        self.prominent = prominent
+        self.size = size
+    }
+
+    public func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            if prominent {
+                content
+                    .buttonStyle(.glassProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(size)
+            } else {
+                content
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(size)
+            }
+        } else {
+            fallbackStyled(content)
+        }
+        #else
+        fallbackStyled(content)
+        #endif
+    }
+
+    @ViewBuilder
+    private func fallbackStyled(_ content: Content) -> some View {
+        if prominent {
+            content
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(size)
+        } else {
+            content
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .controlSize(size)
+        }
+    }
+}
+
+public extension View {
+    func toolbarCapsuleControlStyle(prominent: Bool = false, size: ControlSize = .small) -> some View {
+        self.modifier(ToolbarCapsuleControlStyleModifier(prominent: prominent, size: size))
+    }
+}

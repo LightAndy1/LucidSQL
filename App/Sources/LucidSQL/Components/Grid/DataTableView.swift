@@ -589,6 +589,16 @@ public final class LucidDataTableView: NSTableView {
             onSetNullForCell?(activeRow, activeColumn)
             return true
         }
+        if window?.firstResponder === self,
+           event.modifierFlags.contains(.command),
+           event.keyCode == 51 || event.keyCode == 117 {
+            let targetRow = selectedRow >= 0 ? selectedRow : activeRow
+            if targetRow >= 0,
+               (canDeleteRowHandler?(targetRow) ?? false) || (isRowStagedForDeletionHandler?(targetRow) ?? false) {
+                onToggleDeleteRow?(targetRow)
+                return true
+            }
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -603,6 +613,16 @@ public final class LucidDataTableView: NSTableView {
         if event.modifierFlags.contains([.command, .option]) && event.charactersIgnoringModifiers?.lowercased() == "n" {
             if activeRow >= 0 && activeColumn >= 1 {
                 onSetNullForCell?(activeRow, activeColumn)
+            }
+            return
+        }
+
+        // Cmd+Delete toggles row deletion or removes selected draft row
+        if event.modifierFlags.contains(.command) && (event.keyCode == 51 || event.keyCode == 117) {
+            let targetRow = selectedRow >= 0 ? selectedRow : activeRow
+            if targetRow >= 0,
+               (canDeleteRowHandler?(targetRow) ?? false) || (isRowStagedForDeletionHandler?(targetRow) ?? false) {
+                onToggleDeleteRow?(targetRow)
             }
             return
         }
@@ -762,7 +782,8 @@ public final class LucidDataTableView: NSTableView {
             } else {
                 title = "Stage Row for Deletion"
             }
-            let deleteItem = NSMenuItem(title: title, action: #selector(contextToggleDeleteRow(_:)), keyEquivalent: "")
+            let deleteItem = NSMenuItem(title: title, action: #selector(contextToggleDeleteRow(_:)), keyEquivalent: "\u{0008}")
+            deleteItem.keyEquivalentModifierMask = [.command]
             deleteItem.target = self
             menu.addItem(deleteItem)
         }

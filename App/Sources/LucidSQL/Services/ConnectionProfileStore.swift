@@ -159,9 +159,18 @@ public final class ConnectionProfileStore: @unchecked Sendable {
         }
 
         if let duplicated, duplicated.rememberPassword, let passwordStore,
-           let existingPassword = try? passwordStore.getPassword(profileId: id),
-           !existingPassword.isEmpty {
-            try? passwordStore.savePassword(profileId: duplicated.id, password: existingPassword)
+           passwordStore.hasStoredPassword(profileId: id) {
+            switch passwordStore.lookupPassword(profileId: id) {
+            case .found(let existingPassword) where !existingPassword.isEmpty:
+                try? passwordStore.savePassword(profileId: duplicated.id, password: existingPassword)
+            case .accessDenied, .failed:
+                var fallback = duplicated
+                fallback.rememberPassword = false
+                try? saveOrUpdateProfile(fallback, markAsConnected: false, markSelected: true)
+                return fallback
+            default:
+                break
+            }
         }
 
         return duplicated

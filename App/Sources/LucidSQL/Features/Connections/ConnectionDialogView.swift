@@ -3,6 +3,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 import LucidSQLBridge
 
+enum CredentialEditState: Equatable {
+    case none
+    case savedInKeychain
+    case replacing
+    case forgetPending
+}
+
 @MainActor
 final class ConnectionDialogModel: ObservableObject {
     @Published var savedProfiles: [ConnectionProfile] = []
@@ -16,6 +23,8 @@ final class ConnectionDialogModel: ObservableObject {
     @Published var user: String = "postgres"
     @Published var password: String = ""
     @Published var rememberPassword: Bool = true
+    @Published var credentialState: CredentialEditState = .none
+    @Published var hasSavedPasswordInKeychain: Bool = false
     @Published var sslMode: String = "prefer"
     @Published var sslRootCertPath: String = ""
     @Published var timeoutSeconds: Int = 10
@@ -39,6 +48,7 @@ final class ConnectionDialogModel: ObservableObject {
     private let onProfilesChanged: (() -> Void)?
 
     private var editingProfileId: UUID
+    private var sessionResolvedPassword: String? = nil
 
     init(
         profile: ConnectionProfile,
@@ -80,14 +90,52 @@ final class ConnectionDialogModel: ObservableObject {
         self.database = profile.database
         self.user = profile.user
         self.rememberPassword = profile.rememberPassword
-        if profile.rememberPassword {
-            self.password = (try? passwordStore.getPassword(profileId: profile.id)) ?? ""
-        } else {
-            self.password = ""
-        }
+        self.password = ""
+        self.sessionResolvedPassword = nil
+        let hasSaved = profile.rememberPassword && passwordStore.hasStoredPassword(profileId: profile.id)
+        self.hasSavedPasswordInKeychain = hasSaved
+        self.credentialState = hasSaved ? .savedInKeychain : .none
         self.sslMode = profile.sslMode
         self.sslRootCertPath = profile.sslRootCert ?? ""
         self.timeoutSeconds = Int(max(1, min(300, profile.timeoutSeconds)))
+    }
+
+    func beginReplacingPassword() {
+        credentialState = .replacing
+        rememberPassword = true
+        password = ""
+        sessionResolvedPassword = nil
+        testResultMessage = nil
+        testResultIsError = false
+    }
+
+    func cancelReplacingPassword() {
+        password = ""
+        if hasSavedPasswordInKeychain {
+            credentialState = .savedInKeychain
+            rememberPassword = true
+        } else {
+            credentialState = .none
+        }
+    }
+
+    func markForgetSavedPassword() {
+        credentialState = .forgetPending
+        rememberPassword = false
+        password = ""
+        sessionResolvedPassword = nil
+        testResultMessage = nil
+        testResultIsError = false
+    }
+
+    func undoForgetSavedPassword() {
+        password = ""
+        if hasSavedPasswordInKeychain {
+            credentialState = .savedInKeychain
+            rememberPassword = true
+        } else {
+            credentialState = .none
+        }
     }
 
     var requiresCaVerification: Bool {
@@ -282,6 +330,11 @@ final class ConnectionDialogModel: ObservableObject {
         database = parsed.database
         user = parsed.user
         password = parsed.password ?? ""
+        sessionResolvedPassword = nil
+        if !(parsed.password ?? "").isEmpty {
+            rememberPassword = true
+            credentialState = .replacing
+        }
         sslMode = parsed.sslMode ?? "prefer"
         sslRootCertPath = parsed.sslRootCert ?? ""
         timeoutSeconds = Int(max(1, min(300, parsed.timeoutSeconds ?? 10)))
@@ -304,6 +357,8 @@ final class ConnectionDialogModel: ObservableObject {
 
     func clearSensitiveTransientInputs() {
         connectionUrlInput = ""
+        password = ""
+        sessionResolvedPassword = nil
     }
 
     func buildUpdatedProfile() -> ConnectionProfile {
@@ -332,14 +387,26 @@ final class ConnectionDialogModel: ObservableObject {
             markAsConnected: markAsConnected,
             markSelected: true
         )
-        if updated.rememberPassword {
-            if !password.isEmpty {
+        if !password.isEmpty {
+            if updated.rememberPassword {
                 try? passwordStore.savePassword(profileId: updated.id, password: password)
+                hasSavedPasswordInKeychain = true
+                credentialState = .savedInKeychain
             } else {
                 try? passwordStore.deletePassword(profileId: updated.id)
+                hasSavedPasswordInKeychain = false
+                credentialState = .none
             }
-        } else {
+            sessionResolvedPassword = password
+        } else if credentialState == .forgetPending || !updated.rememberPassword {
+            // Only remove stored credentials when the user explicitly chose Forget or unchecked Remember.
             try? passwordStore.deletePassword(profileId: updated.id)
+            hasSavedPasswordInKeychain = false
+            credentialState = .none
+            sessionResolvedPassword = nil
+        } else {
+            // Preserve existing Keychain credential untouched during metadata edits.
+            credentialState = hasSavedPasswordInKeychain ? .savedInKeychain : .none
         }
         isEditingSavedProfile = true
         selectedSidebarProfileId = updated.id
@@ -353,13 +420,51 @@ final class ConnectionDialogModel: ObservableObject {
         testResultIsError = false
     }
 
+    func resolvePasswordForExplicitAction() -> PasswordLookupResult {
+        if !password.isEmpty {
+            return .found(password)
+        }
+        if credentialState == .forgetPending || !rememberPassword || !hasSavedPasswordInKeychain {
+            return .notFound
+        }
+        if let cached = sessionResolvedPassword, !cached.isEmpty {
+            return .found(cached)
+        }
+
+        let result = passwordStore.lookupPassword(profileId: editingProfileId)
+        switch result {
+        case .found(let fetched):
+            sessionResolvedPassword = fetched
+        case .accessDenied:
+            testResultMessage = "Keychain access was denied or cancelled. Allow Keychain access or enter a password to continue."
+            testResultIsError = true
+        case .failed(let reason):
+            testResultMessage = reason
+            testResultIsError = true
+        case .notFound:
+            break
+        }
+        return result
+    }
+
     func runConnectionTest() async {
         isTesting = true
         testResultMessage = nil
         testResultIsError = false
 
+        let resolvedPassword: String?
+        switch resolvePasswordForExplicitAction() {
+        case .found(let pw):
+            resolvedPassword = pw
+        case .notFound:
+            resolvedPassword = nil
+        case .accessDenied, .failed:
+            isTesting = false
+            return
+        }
+
         let profile = buildUpdatedProfile()
-        let config = profile.toRustConfig(password: password.isEmpty ? nil : password)
+        let config = profile.toRustConfig(password: resolvedPassword)
 
         do {
             let version = try await test_database_connection(config: config)
@@ -376,10 +481,18 @@ final class ConnectionDialogModel: ObservableObject {
         isTesting = false
     }
 
-    func passwordForSavedProfile(_ profile: ConnectionProfile) -> String? {
-        guard profile.rememberPassword else { return nil }
-        let value = try? passwordStore.getPassword(profileId: profile.id)
-        return (value?.isEmpty == false) ? value : nil
+    func lookupSavedPasswordOnce(_ profile: ConnectionProfile) -> PasswordLookupResult {
+        guard profile.rememberPassword, passwordStore.hasStoredPassword(profileId: profile.id) else {
+            return .notFound
+        }
+        if editingProfileId == profile.id, let cached = sessionResolvedPassword, !cached.isEmpty {
+            return .found(cached)
+        }
+        let result = passwordStore.lookupPassword(profileId: profile.id)
+        if editingProfileId == profile.id, case .found(let pw) = result {
+            sessionResolvedPassword = pw
+        }
+        return result
     }
 
     func markProfileConnected(_ profile: ConnectionProfile) {
@@ -707,14 +820,75 @@ public struct ConnectionDialogView: View {
                                             .font(.system(size: 13))
                                             .foregroundStyle(.secondary)
                                         VStack(alignment: .leading, spacing: 6) {
-                                            SecureField("Optional", text: $model.password)
-                                                .textFieldStyle(.roundedBorder)
-                                                .controlSize(.regular)
+                                            if model.credentialState == .savedInKeychain && model.rememberPassword {
+                                                HStack(spacing: 8) {
+                                                    HStack(spacing: 5) {
+                                                        Image(systemName: "lock.fill")
+                                                            .font(.system(size: 10, weight: .semibold))
+                                                            .foregroundStyle(.secondary)
+                                                        Text("Saved in Keychain")
+                                                            .font(.system(size: 12, weight: .medium))
+                                                            .foregroundStyle(.primary)
+                                                    }
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 4)
+                                                    .background(Color.secondary.opacity(0.1), in: Capsule())
+
+                                                    Spacer(minLength: 4)
+
+                                                    Button("Replace") {
+                                                        model.beginReplacingPassword()
+                                                    }
+                                                    .buttonStyle(.bordered)
+                                                    .controlSize(.small)
+
+                                                    Button("Forget") {
+                                                        model.markForgetSavedPassword()
+                                                    }
+                                                    .buttonStyle(.bordered)
+                                                    .controlSize(.small)
+                                                }
+                                            } else if model.credentialState == .forgetPending {
+                                                HStack(spacing: 8) {
+                                                    Text("Will remove from Keychain on Save")
+                                                        .font(.system(size: 12))
+                                                        .foregroundStyle(.orange)
+
+                                                    Spacer(minLength: 4)
+
+                                                    Button("Undo") {
+                                                        model.undoForgetSavedPassword()
+                                                    }
+                                                    .buttonStyle(.bordered)
+                                                    .controlSize(.small)
+                                                }
+                                            } else {
+                                                HStack(spacing: 6) {
+                                                    SecureField(
+                                                        model.hasSavedPasswordInKeychain ? "Enter new password" : "Optional",
+                                                        text: $model.password
+                                                    )
+                                                    .textFieldStyle(.roundedBorder)
+                                                    .controlSize(.regular)
+
+                                                    if model.credentialState == .replacing && model.hasSavedPasswordInKeychain {
+                                                        Button("Keep Saved") {
+                                                            model.cancelReplacingPassword()
+                                                        }
+                                                        .buttonStyle(.bordered)
+                                                        .controlSize(.small)
+                                                    }
+                                                }
+                                            }
+
                                             Toggle("Remember password in macOS Keychain", isOn: $model.rememberPassword)
                                                 .toggleStyle(.checkbox)
                                                 .font(.system(size: 12))
+
                                             if !model.rememberPassword {
-                                                Text("Session-only; removed from Keychain on save.")
+                                                Text(model.hasSavedPasswordInKeychain && model.credentialState != .forgetPending
+                                                    ? "Saved password will be removed from Keychain on Save."
+                                                    : "Session-only; not stored in Keychain.")
                                                     .font(.system(size: 11))
                                                     .foregroundStyle(.secondary)
                                                     .fixedSize(horizontal: false, vertical: true)
@@ -907,21 +1081,46 @@ public struct ConnectionDialogView: View {
     }
 
     private func saveAndConnect() {
+        let resolvedPassword: String?
+        switch model.resolvePasswordForExplicitAction() {
+        case .found(let pw):
+            resolvedPassword = pw
+        case .notFound:
+            resolvedPassword = nil
+        case .accessDenied, .failed:
+            return
+        }
+
         let saved = model.persistCurrentProfile(markAsConnected: true)
-        let sessionPassword = model.password.isEmpty ? nil : model.password
         model.clearSensitiveTransientInputs()
-        onConnect(saved, sessionPassword)
+        onConnect(saved, resolvedPassword)
         dismiss()
     }
 
     private func quickConnectFromSidebar(_ profile: ConnectionProfile) {
         model.selectSavedProfile(profile.id)
-        if !profile.rememberPassword && model.password.isEmpty {
+        if !profile.rememberPassword {
             model.testResultMessage = "Enter password for \"\(profile.name)\" and click Connect."
             model.testResultIsError = false
             return
         }
-        let pw = model.password.isEmpty ? model.passwordForSavedProfile(profile) : model.password
+
+        let pw: String?
+        switch model.lookupSavedPasswordOnce(profile) {
+        case .found(let value):
+            pw = value
+        case .notFound:
+            pw = nil
+        case .accessDenied:
+            model.testResultMessage = "Keychain access was denied or cancelled. Allow Keychain access or enter a password to continue."
+            model.testResultIsError = true
+            return
+        case .failed(let reason):
+            model.testResultMessage = reason
+            model.testResultIsError = true
+            return
+        }
+
         model.markProfileConnected(profile)
         model.clearSensitiveTransientInputs()
         onConnect(profile, pw)

@@ -307,8 +307,7 @@ public struct StagedChangesReviewSheet: View {
                     viewModel.discardChanges()
                     dismiss()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .toolbarCapsuleControlStyle(size: .regular)
                 .disabled(viewModel.isApplying)
 
                 if viewModel.hasUncertainCommitOutcome {
@@ -318,9 +317,8 @@ public struct StagedChangesReviewSheet: View {
                             dismiss()
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .toolbarCapsuleControlStyle(prominent: true, size: .regular)
                     .tint(.orange)
-                    .controlSize(.regular)
                     .disabled(viewModel.isApplying)
                 } else if viewModel.errorMessage != nil {
                     Button("Discard & Reload") {
@@ -329,8 +327,7 @@ public struct StagedChangesReviewSheet: View {
                             dismiss()
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .toolbarCapsuleControlStyle(size: .regular)
                     .disabled(viewModel.isApplying)
                 }
 
@@ -339,8 +336,8 @@ public struct StagedChangesReviewSheet: View {
                 Button("Cancel") {
                     dismiss()
                 }
+                .toolbarCapsuleControlStyle(size: .regular)
                 .keyboardShortcut(.cancelAction)
-                .controlSize(.regular)
                 .disabled(viewModel.isApplying)
 
                 PrimaryActionButton(

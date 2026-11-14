@@ -19,7 +19,7 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var initialDialogNotice: String? = nil
     @Published public var isShowingConnectionSheet: Bool = false
     @Published public var selectedTable: String = ""
-    @Published public var currentMode: WorkspaceMode = .sqlEditor
+    @Published public var currentMode: WorkspaceMode = .tableData
     @Published public var showingDisconnectSessionWarning: Bool = false
     @Published public var disconnectWarningMessage: String = ""
     @Published public var showingSwitchConnectionAlert: Bool = false
@@ -47,7 +47,7 @@ public final class WorkspaceModel: ObservableObject {
 
     private var terminateObserver: NSObjectProtocol? = nil
     private var pendingTableNavigationAction: (() -> Void)? = nil
-    private var pendingConnectionSwitch: (profile: ConnectionProfile, password: String?)? = nil
+    private var pendingConnectionSwitch: (profile: ConnectionProfile, password: String?, needsKeychainLookup: Bool)? = nil
     private var quickConnectTask: Task<Void, Never>? = nil
 
     public var sqlEditorViewModel: SqlEditorViewModel {
@@ -183,12 +183,57 @@ public final class WorkspaceModel: ObservableObject {
             return
         }
 
-        let storedPassword = (try? passwordStore.getPassword(profileId: profile.id)) ?? nil
-        let resolvedPassword = (storedPassword?.isEmpty == false) ? storedPassword : nil
-
+        // Check active-session and pending-edit safeguards BEFORE reading Keychain.
         if activeConfig != nil && !lifecycleSummary.isEmpty {
-            requestConnection(profile, password: resolvedPassword)
+            pendingConnectionSwitch = (profile, nil, true)
+            switchConnectionWarningMessage = formattedLifecycleWarning(actionVerb: "switch connections")
+            showingSwitchConnectionAlert = true
             return
+        }
+
+        startQuickConnectAttempt(profile: profile, preResolvedPassword: nil, lookupFromKeychain: true)
+    }
+
+    private func resolveSavedPasswordForConnect(profile: ConnectionProfile) -> (proceed: Bool, password: String?) {
+        guard profile.rememberPassword, passwordStore.hasStoredPassword(profileId: profile.id) else {
+            return (true, nil)
+        }
+        switch passwordStore.lookupPassword(profileId: profile.id) {
+        case .found(let pw):
+            return (true, pw)
+        case .notFound:
+            return (true, nil)
+        case .accessDenied:
+            self.quickConnectErrorProfileId = profile.id
+            self.quickConnectErrorMessage = "Keychain access was denied or cancelled. Enter a password or allow Keychain access to connect."
+            if self.activeConfig != nil {
+                self.showingQuickConnectErrorAlert = true
+            }
+            return (false, nil)
+        case .failed(let reason):
+            self.quickConnectErrorProfileId = profile.id
+            self.quickConnectErrorMessage = reason
+            if self.activeConfig != nil {
+                self.showingQuickConnectErrorAlert = true
+            }
+            return (false, nil)
+        }
+    }
+
+    private func startQuickConnectAttempt(
+        profile: ConnectionProfile,
+        preResolvedPassword: String?,
+        lookupFromKeychain: Bool
+    ) {
+        let resolvedPassword: String?
+        if let preResolvedPassword {
+            resolvedPassword = preResolvedPassword.isEmpty ? nil : preResolvedPassword
+        } else if lookupFromKeychain {
+            let resolution = resolveSavedPasswordForConnect(profile: profile)
+            guard resolution.proceed else { return }
+            resolvedPassword = resolution.password
+        } else {
+            resolvedPassword = nil
         }
 
         connectingProfileId = profile.id
@@ -257,7 +302,7 @@ public final class WorkspaceModel: ObservableObject {
         }
 
         if !lifecycleSummary.isEmpty {
-            pendingConnectionSwitch = (profile, password)
+            pendingConnectionSwitch = (profile, password, false)
             switchConnectionWarningMessage = formattedLifecycleWarning(actionVerb: "switch connections")
             showingSwitchConnectionAlert = true
         } else {
@@ -273,6 +318,10 @@ public final class WorkspaceModel: ObservableObject {
         showingSwitchConnectionAlert = false
         switchConnectionWarningMessage = ""
         guard let target = pending else { return }
+        if target.needsKeychainLookup {
+            startQuickConnectAttempt(profile: target.profile, preResolvedPassword: nil, lookupFromKeychain: true)
+            return
+        }
         Task { @MainActor in
             await self.performConfirmedConnectionSwitch(to: target.profile, password: target.password)
         }
@@ -304,7 +353,7 @@ public final class WorkspaceModel: ObservableObject {
         self.activeProfile = profile
         self.activeConfig = profile.toRustConfig(password: password)
         self.activeConnectionSessionToken = UUID()
-        self.currentMode = .sqlEditor
+        self.currentMode = .tableData
         self.sqlWorkspace.activate(profileId: profile.id, readOnlyDefault: self.tableViewModel.isReadOnly)
         self.tableViewModel.isReadOnly = self.sqlWorkspace.activeTab?.isReadOnly ?? self.sqlWorkspace.defaultReadOnly
     }
@@ -483,7 +532,7 @@ public final class WorkspaceModel: ObservableObject {
         self.activeProfile = nil
         self.activeConfig = nil
         self.selectedTable = ""
-        self.currentMode = .sqlEditor
+        self.currentMode = .tableData
         self.tableViewModel = TableDataViewModel()
         self.tableViewModel.isReadOnly = currentReadOnly
     }
@@ -559,21 +608,14 @@ public struct WorkspaceView: View {
                                 }
                             )
                         } else {
-                            VStack(spacing: 16) {
+                            VStack(spacing: 10) {
                                 Spacer()
                                 Image(systemName: "tablecells")
-                                    .font(.system(size: 48))
-                                    .foregroundStyle(Color.accentColor)
-                                Text("Select a table or view from the sidebar to inspect records")
-                                    .font(.system(size: 14))
+                                    .font(.system(size: 32, weight: .light))
+                                    .foregroundStyle(.tertiary)
+                                Text("Select a table in the sidebar")
+                                    .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                SecondaryActionButton(
-                                    title: "Open SQL Editor",
-                                    icon: "terminal",
-                                    size: .regular
-                                ) {
-                                    model.currentMode = .sqlEditor
-                                }
                                 Spacer()
                             }
                         }
@@ -698,18 +740,19 @@ private final class WelcomeHoverState: ObservableObject {
 private struct WelcomeView: View {
     @ObservedObject var model: WorkspaceModel
     @StateObject private var hoverState = WelcomeHoverState()
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        VStack(spacing: 22) {
-            Spacer(minLength: 20)
+        VStack(spacing: 24) {
+            Spacer(minLength: 24)
 
             VStack(spacing: 10) {
                 Image(systemName: "cylinder.split.1x2.fill")
-                    .font(.system(size: 48))
+                    .font(.system(size: 46))
                     .foregroundStyle(Color.accentColor)
 
                 Text("LucidSQL")
-                    .font(.system(size: 30, weight: .bold))
+                    .font(.system(size: 28, weight: .semibold))
 
                 Text("PostgreSQL client for macOS")
                     .font(.system(size: 13))
@@ -717,22 +760,37 @@ private struct WelcomeView: View {
             }
 
             if model.savedProfiles.isEmpty {
-                PrimaryActionButton(
-                    title: "New Connection",
-                    icon: "plus",
-                    size: .large
-                ) {
-                    model.openConnectionDialog(startNew: true)
+                VStack(spacing: 10) {
+                    PrimaryActionButton(
+                        title: "New Connection",
+                        icon: "plus",
+                        size: .large
+                    ) {
+                        model.openConnectionDialog(startNew: true)
+                    }
+
+                    Text("Add a PostgreSQL connection to get started.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
                 .padding(.top, 4)
             } else {
-                VStack(spacing: 14) {
+                VStack(spacing: 16) {
                     savedConnectionsList
-                        .frame(maxWidth: 360)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .frame(maxWidth: 348)
+                        .background {
+                            if reduceTransparency {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color(NSColor.controlBackgroundColor))
+                            } else {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(.regularMaterial)
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(Color(NSColor.separatorColor).opacity(0.35), lineWidth: 0.5)
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(reduceTransparency ? 0.16 : 0.08), lineWidth: 0.5)
                         )
 
                     if let errorMsg = model.quickConnectErrorMessage {
@@ -750,8 +808,7 @@ private struct WelcomeView: View {
                                 Button("Edit…") {
                                     model.openConnectionDialog(selecting: failedProfile)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
+                                .toolbarCapsuleControlStyle(size: .mini)
                             }
                             Button {
                                 model.clearQuickConnectError()
@@ -762,13 +819,13 @@ private struct WelcomeView: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .frame(maxWidth: 360)
-                        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: 348)
+                        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
-                    VStack(spacing: 8) {
+                    VStack(spacing: 10) {
                         PrimaryActionButton(
                             title: "New Connection",
                             icon: "plus",
@@ -787,7 +844,7 @@ private struct WelcomeView: View {
                 }
             }
 
-            Spacer(minLength: 20)
+            Spacer(minLength: 24)
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -795,16 +852,21 @@ private struct WelcomeView: View {
 
     @ViewBuilder
     private var savedConnectionsList: some View {
-        let rows = VStack(spacing: 2) {
-            ForEach(model.savedProfiles) { profile in
+        let rows = VStack(spacing: 0) {
+            ForEach(Array(model.savedProfiles.enumerated()), id: \.element.id) { index, profile in
                 SavedProfileRowView(
                     profile: profile,
                     model: model,
                     hoverState: hoverState
                 )
+                if index < model.savedProfiles.count - 1 {
+                    Divider()
+                        .opacity(0.45)
+                        .padding(.leading, 38)
+                }
             }
         }
-        .padding(6)
+        .padding(.vertical, 4)
 
         if model.savedProfiles.count <= 5 {
             rows
@@ -812,7 +874,7 @@ private struct WelcomeView: View {
             ScrollView {
                 rows
             }
-            .frame(height: 216)
+            .frame(height: 232)
         }
     }
 }
@@ -834,12 +896,8 @@ private struct SavedProfileRowView: View {
         model.connectingProfileId != nil
     }
 
-    private var isSelected: Bool {
-        model.selectedProfileId == profile.id
-    }
-
     private var hostSummary: String {
-        profile.port == 5432 ? profile.host : "\(profile.host):\(profile.port)"
+        profile.port == 5432 ? profile.host : "\(profile.host):\(String(profile.port))"
     }
 
     var body: some View {
@@ -848,10 +906,11 @@ private struct SavedProfileRowView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "cylinder.split.1x2")
-                    .font(.system(size: 12))
+                    .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(isConnectingThis ? Color.accentColor : .secondary)
+                    .frame(width: 16)
 
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 1.5) {
                     Text(profile.name)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.primary)
@@ -877,11 +936,13 @@ private struct SavedProfileRowView: View {
                         .help("Password not stored in Keychain")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(rowBackgroundColor)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
             )
             .contentShape(Rectangle())
         }
@@ -915,13 +976,10 @@ private struct SavedProfileRowView: View {
 
     private var rowBackgroundColor: Color {
         if isConnectingThis {
-            return Color.accentColor.opacity(0.12)
+            return Color.accentColor.opacity(0.14)
         }
         if isHovered && !isAnyConnecting {
-            return Color.primary.opacity(0.06)
-        }
-        if isSelected {
-            return Color.primary.opacity(0.035)
+            return Color.primary.opacity(0.065)
         }
         return Color.clear
     }
@@ -934,16 +992,7 @@ private struct WorkspaceDetailBackground: View {
         if reduceTransparency {
             Color(NSColor.controlBackgroundColor)
         } else {
-            #if compiler(>=6.2)
-            if #available(macOS 26.0, *) {
-                Color.clear
-                    .glassEffect(.regular, in: Rectangle())
-            } else {
-                VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
-            }
-            #else
             VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
-            #endif
         }
     }
 }
@@ -1019,57 +1068,63 @@ private struct ToolbarConnectionSelector: View {
                         Text("Connecting… ")
                             .font(.system(size: 12, weight: .medium))
                         + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 8.5, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
                     )
                 } else {
+                    let displayName = profile.name.count > 22 ? String(profile.name.prefix(21)) + "…" : profile.name
+                    let host = hostSummary(for: profile)
+                    let displayHost = host.count > 24 ? String(host.prefix(23)) + "…" : host
                     (
                         Text(Image(systemName: "circle.fill"))
                             .font(.system(size: 7))
                             .foregroundColor(.green)
-                        + Text("  \(profile.name)")
-                            .font(.system(size: 12, weight: .medium))
-                        + Text("  \(hostSummary(for: profile))")
-                            .font(.system(size: 11))
+                        + Text("  \(displayName)")
+                            .font(.system(size: 12.5, weight: .medium))
+                        + Text("  \(displayHost)")
+                            .font(.system(size: 11.5))
                             .foregroundColor(.secondary)
                         + Text("  ")
                             .font(.system(size: 7))
                         + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 8.5, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
                     )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 }
             }
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .frame(maxWidth: 280)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .frame(minHeight: 24)
+            .frame(maxWidth: 300)
+            .fixedSize(horizontal: true, vertical: false)
         } else {
             Group {
                 if model.connectingProfileId != nil {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         ProgressView()
                             .controlSize(.mini)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(.tertiary)
+                        Text(Image(systemName: "chevron.down"))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
                     }
                 } else {
                     (
                         Text(Image(systemName: "cylinder.split.1x2"))
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 12.5, weight: .medium))
                             .foregroundColor(.secondary)
-                        + Text(" ")
+                        + Text("  ")
                             .font(.system(size: 7))
                         + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 8.5, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
                     )
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .frame(minWidth: 46, minHeight: 24)
             .fixedSize()
         }
     }

@@ -18,10 +18,10 @@ public struct TableDataContainerView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 6) {
-                // Table Identity
-                HStack(spacing: 5) {
+            // Minimal Main Table Header (stable layout across idle & editing states)
+            HStack(spacing: 8) {
+                // Table Identity & Safety State
+                HStack(spacing: 6) {
                     Image(systemName: "tablecells")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -30,7 +30,7 @@ public struct TableDataContainerView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .layoutPriority(2)
+                        .layoutPriority(1)
                         .help("\(viewModel.currentSchema).\(viewModel.currentTable)")
 
                     Text(viewModel.currentSchema)
@@ -45,9 +45,9 @@ public struct TableDataContainerView: View {
                     if viewModel.isSystemSchema {
                         HStack(spacing: 3) {
                             Image(systemName: "lock.fill")
-                                .font(.system(size: 8))
-                            Text("System (Read-Only)")
-                                .font(.system(size: 9, weight: .medium))
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text("System")
+                                .font(.system(size: 10, weight: .medium))
                         }
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -59,22 +59,23 @@ public struct TableDataContainerView: View {
                     } else if viewModel.hasPrimaryKey {
                         HStack(spacing: 3) {
                             Image(systemName: "key.fill")
-                                .font(.system(size: 8))
+                                .font(.system(size: 8.5, weight: .semibold))
                             Text("PK")
-                                .font(.system(size: 9, weight: .bold))
+                                .font(.system(size: 10, weight: .bold))
                         }
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.orange)
-                        .padding(.horizontal, 5)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.orange.opacity(0.12), in: Capsule())
+                        .help("Table has primary key for safe row-level edits.")
                     } else if !viewModel.columns.isEmpty {
                         HStack(spacing: 3) {
                             Image(systemName: "lock.fill")
-                                .font(.system(size: 8))
-                            Text("No PK (Read-Only)")
-                                .font(.system(size: 9, weight: .medium))
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text("No PK")
+                                .font(.system(size: 10, weight: .medium))
                         }
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -89,17 +90,17 @@ public struct TableDataContainerView: View {
                         Button {
                             onToggleReadOnly()
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 3.5) {
                                 Image(systemName: viewModel.isReadOnly ? "lock.fill" : "lock.open")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 8.5, weight: .semibold))
                                 Text(viewModel.isReadOnly ? "Read-Only" : "Read-Write")
-                                    .font(.system(size: 9, weight: .medium))
+                                    .font(.system(size: 10, weight: .medium))
                             }
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
-                            .background(viewModel.isReadOnly ? Color.orange.opacity(0.15) : Color.secondary.opacity(0.1), in: Capsule())
+                            .background(viewModel.isReadOnly ? Color.orange.opacity(0.16) : Color.secondary.opacity(0.1), in: Capsule())
                             .foregroundStyle(viewModel.isReadOnly ? Color.orange : Color.secondary)
                         }
                         .buttonStyle(.plain)
@@ -109,9 +110,9 @@ public struct TableDataContainerView: View {
                     } else if viewModel.isReadOnly {
                         HStack(spacing: 3) {
                             Image(systemName: "lock.shield.fill")
-                                .font(.system(size: 8))
+                                .font(.system(size: 8.5, weight: .semibold))
                             Text("Read-Only")
-                                .font(.system(size: 9, weight: .medium))
+                                .font(.system(size: 10, weight: .medium))
                         }
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -123,169 +124,180 @@ public struct TableDataContainerView: View {
                 }
                 .layoutPriority(1)
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 8)
 
-                // Row Add / Delete Controls
-                if viewModel.isEditable && !viewModel.columns.isEmpty {
-                    HStack(spacing: 5) {
+                // Consistent Glass Capsule Controls
+                HStack(spacing: 8) {
+                    if viewModel.isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    if viewModel.isEditable && !viewModel.columns.isEmpty {
                         Button {
                             NSApp.keyWindow?.makeFirstResponder(nil)
                             viewModel.addDraftRow()
                         } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 10, weight: .semibold))
-                                Text("Add Row")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
+                            Label("Add Row", systemImage: "plus")
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .toolbarCapsuleControlStyle(size: .small)
                         .disabled(viewModel.isLoading || viewModel.isApplying)
                         .help("Add a new local draft row (not written until Apply)")
+                    }
 
-                        let selectedIsPendingDelete = viewModel.selectedRowIndex.map { viewModel.isRowStagedForDeletion($0) } ?? false
-                        let canDeleteSelected = viewModel.selectedRowIndex.map { viewModel.canDeleteRow($0) } ?? false
+                    // Pagination & Refresh Cluster
+                    HStack(spacing: 4) {
+                        Button {
+                            viewModel.previousPage(config: config)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .toolbarCapsuleControlStyle(size: .small)
+                        .disabled(viewModel.offset == 0 || viewModel.isLoading)
+                        .accessibilityLabel("Previous Page")
+                        .help("Previous Page")
+
+                        Text(rowCountText)
+                            .font(.system(size: 11, design: .monospaced))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+
+                        Button {
+                            viewModel.nextPage(config: config)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .toolbarCapsuleControlStyle(size: .small)
+                        .disabled(!viewModel.hasMore || viewModel.isLoading)
+                        .accessibilityLabel("Next Page")
+                        .help("Next Page")
+
+                        Button {
+                            viewModel.reloadTable(config: config)
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .toolbarCapsuleControlStyle(size: .small)
+                        .disabled(viewModel.isLoading)
+                        .accessibilityLabel("Reload Table")
+                        .help("Reload Table")
+                    }
+
+                    // Secondary & Row Operations Overflow Menu
+                    let selectedIsPendingDelete = viewModel.selectedRowIndex.map { viewModel.isRowStagedForDeletion($0) } ?? false
+                    let canDeleteSelected = viewModel.selectedRowIndex.map { viewModel.canDeleteRow($0) } ?? false
+
+                    Menu {
+                        if viewModel.isEditable && !viewModel.columns.isEmpty {
+                            Button(role: selectedIsPendingDelete ? nil : .destructive) {
+                                NSApp.keyWindow?.makeFirstResponder(nil)
+                                viewModel.toggleDeleteSelectedRow()
+                            } label: {
+                                Label(
+                                    selectedIsPendingDelete ? "Undo Delete Selected Row" : "Delete Selected Row",
+                                    systemImage: selectedIsPendingDelete ? "arrow.uturn.backward" : "trash"
+                                )
+                            }
+                            .keyboardShortcut(.delete, modifiers: [.command])
+                            .disabled(!canDeleteSelected || viewModel.isLoading || viewModel.isApplying)
+
+                            Divider()
+                        }
 
                         Button {
                             NSApp.keyWindow?.makeFirstResponder(nil)
-                            viewModel.toggleDeleteSelectedRow()
+                            _ = viewModel.prepareCsvExport(config: config)
                         } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: selectedIsPendingDelete ? "arrow.uturn.backward" : "trash")
-                                    .font(.system(size: 10, weight: .semibold))
-                                Text(selectedIsPendingDelete ? "Undo Delete" : "Delete")
-                                    .font(.system(size: 11, weight: .medium))
+                            Label("Export CSV…", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(viewModel.columns.isEmpty || viewModel.isLoading)
+
+                        if let onToggleReadOnly {
+                            Divider()
+                            Button {
+                                onToggleReadOnly()
+                            } label: {
+                                Label(
+                                    viewModel.isReadOnly ? "Allow Read-Write Editing" : "Enable Read-Only Mode",
+                                    systemImage: viewModel.isReadOnly ? "lock.open" : "lock.fill"
+                                )
                             }
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(!canDeleteSelected || viewModel.isLoading || viewModel.isApplying)
-                        .help(selectedIsPendingDelete
-                            ? "Un-stage deletion for the selected row"
-                            : "Stage selected persisted row for deletion, or remove selected draft row")
-                    }
-                }
-
-                // Staged Changes Actions
-                if viewModel.hasPendingChanges {
-                    HStack(spacing: 6) {
-                        SecondaryActionButton(
-                            title: "Discard (\(viewModel.totalStagedOperationsCount))",
-                            icon: "arrow.uturn.backward",
-                            size: .small
-                        ) {
-                            NSApp.keyWindow?.makeFirstResponder(nil)
-                            viewModel.discardChanges()
-                        }
-                        .help("Discard all staged inserts, edits, and deletions for this table")
-
-                        PrimaryActionButton(
-                            title: "Apply (\(viewModel.totalStagedOperationsCount))",
-                            icon: "checkmark",
-                            size: .small
-                        ) {
-                            NSApp.keyWindow?.makeFirstResponder(nil)
-                            viewModel.showingReviewSheet = true
-                        }
-                        .disabled(viewModel.isReadOnly || viewModel.isSystemSchema || viewModel.isApplying)
-                        .help("Review and atomically apply staged changes")
-                    }
-                    .padding(.trailing, 4)
-                }
-
-                if viewModel.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .padding(.trailing, 4)
-                }
-
-                Button {
-                    NSApp.keyWindow?.makeFirstResponder(nil)
-                    _ = viewModel.prepareCsvExport(config: config)
-                } label: {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text("Export CSV")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                        HStack(spacing: 3) {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text("CSV")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(viewModel.columns.isEmpty || viewModel.isLoading)
-                .help("Export current page or full table data to CSV")
-
-                // Compact Pagination Controls
-                HStack(spacing: 4) {
-                    Button {
-                        viewModel.previousPage(config: config)
                     } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(viewModel.offset == 0 || viewModel.isLoading)
-                    .help("Previous Page")
-
-                    Text(rowCountText)
-                        .font(.system(size: 11, design: .monospaced))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 3)
-
-                    Button {
-                        viewModel.nextPage(config: config)
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(!viewModel.hasMore || viewModel.isLoading)
-                    .help("Next Page")
-
-                    Divider()
-                        .frame(height: 14)
-                        .padding(.horizontal, 1)
-
-                    Button {
-                        viewModel.reloadTable(config: config)
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(viewModel.isLoading)
-                    .help("Reload Table")
+                    .menuIndicator(.hidden)
+                    .toolbarCapsuleControlStyle(size: .small)
+                    .accessibilityLabel("More Table Actions")
+                    .help("More table and row actions (Delete Row, Export CSV, Read-Only)")
                 }
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.ultraThinMaterial)
 
             Divider()
+
+            // Stable Pending-Changes Action Bar (grouped Apply/Discard without crowding the main header)
+            if viewModel.hasPendingChanges {
+                HStack(spacing: 10) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text("Pending changes: \(viewModel.stagedSummaryText)")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.discardChanges()
+                        } label: {
+                            Label("Discard", systemImage: "arrow.uturn.backward")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .toolbarCapsuleControlStyle(size: .small)
+                        .disabled(viewModel.isApplying)
+                        .help("Discard all staged inserts, edits, and deletions for this table")
+
+                        Button {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.showingReviewSheet = true
+                        } label: {
+                            Label("Apply (\(viewModel.totalStagedOperationsCount))", systemImage: "checkmark")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .toolbarCapsuleControlStyle(prominent: true, size: .small)
+                        .disabled(viewModel.isReadOnly || viewModel.isSystemSchema || viewModel.isApplying)
+                        .help(viewModel.isReadOnly || viewModel.isSystemSchema
+                            ? "Read-only mode active; switch to Read-Write to apply changes"
+                            : "Review and atomically apply staged changes")
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.orange.opacity(0.08))
+
+                Divider()
+            }
 
             // Success Status Banner if present
             if let status = viewModel.statusMessage {
@@ -330,15 +342,13 @@ public struct TableDataContainerView: View {
                                 await viewModel.reconcileUncertainCommit(config: config)
                             }
                         }
-                        .controlSize(.small)
-                        .buttonStyle(.borderedProminent)
+                        .toolbarCapsuleControlStyle(prominent: true, size: .small)
                         .tint(.orange)
                     } else {
                         Button("Retry") {
                             viewModel.reloadTable(config: config)
                         }
-                        .controlSize(.small)
-                        .buttonStyle(.bordered)
+                        .toolbarCapsuleControlStyle(size: .small)
 
                         Button {
                             viewModel.errorMessage = nil
@@ -395,8 +405,7 @@ public struct TableDataContainerView: View {
                         Button("Retry") {
                             viewModel.reloadTable(config: config)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                        .toolbarCapsuleControlStyle(prominent: true, size: .small)
                         Spacer(minLength: 4)
                     }
                     .padding(20)
@@ -423,8 +432,7 @@ public struct TableDataContainerView: View {
                                 Label("Add Row", systemImage: "plus")
                                     .font(.system(size: 12, weight: .medium))
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .toolbarCapsuleControlStyle(prominent: true, size: .small)
                         }
                         Spacer(minLength: 4)
                     }
@@ -445,7 +453,7 @@ public struct TableDataContainerView: View {
                 Spacer(minLength: 4)
 
                 if viewModel.isEditable {
-                    Text("Double-click or Enter to edit • Tab to advance • ⎋ to cancel • ⌥⌘N for NULL • Right-click for row menu")
+                    Text("Double-click or Return to edit • ⌥⌘N for NULL • ⌘⌫ or right-click for row menu")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)

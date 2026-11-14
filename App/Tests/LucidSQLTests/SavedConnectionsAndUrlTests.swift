@@ -6,22 +6,62 @@ import LucidSQLBridge
 private final class InMemoryPasswordStore: PasswordStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [UUID: String] = [:]
+    private(set) var hasStoredCalls: Int = 0
+    private(set) var secretLookupCalls: Int = 0
+    private(set) var saveCalls: Int = 0
+    private(set) var deleteCalls: Int = 0
+    var simulateAccessDenied: Bool = false
+
+    func resetCounters() {
+        lock.lock()
+        defer { lock.unlock() }
+        hasStoredCalls = 0
+        secretLookupCalls = 0
+        saveCalls = 0
+        deleteCalls = 0
+    }
 
     func savePassword(profileId: UUID, password: String) throws {
         lock.lock()
         defer { lock.unlock() }
+        saveCalls += 1
         storage[profileId] = password
+    }
+
+    func hasStoredPassword(profileId: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        hasStoredCalls += 1
+        return storage[profileId]?.isEmpty == false
+    }
+
+    func lookupPassword(profileId: UUID) -> PasswordLookupResult {
+        lock.lock()
+        defer { lock.unlock() }
+        secretLookupCalls += 1
+        if simulateAccessDenied {
+            return .accessDenied
+        }
+        if let value = storage[profileId], !value.isEmpty {
+            return .found(value)
+        }
+        return .notFound
     }
 
     func getPassword(profileId: UUID) throws -> String? {
         lock.lock()
         defer { lock.unlock() }
+        secretLookupCalls += 1
+        if simulateAccessDenied {
+            throw KeychainService.KeychainError.secError(errSecUserCanceled)
+        }
         return storage[profileId]
     }
 
     func deletePassword(profileId: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
+        deleteCalls += 1
         storage.removeValue(forKey: profileId)
     }
 
@@ -29,6 +69,12 @@ private final class InMemoryPasswordStore: PasswordStoring, @unchecked Sendable 
         lock.lock()
         defer { lock.unlock() }
         return storage.count
+    }
+
+    var counts: (hasStored: Int, secretLookup: Int, save: Int, delete: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (hasStoredCalls, secretLookupCalls, saveCalls, deleteCalls)
     }
 }
 
@@ -391,7 +437,8 @@ struct SavedConnectionsAndUrlTests {
         #expect(probe.callsCount == 1)
         #expect(model.connectingProfileId == nil)
         #expect(model.activeProfile?.id == profileA.id)
-        #expect(model.currentMode == .sqlEditor)
+        #expect(model.currentMode == .tableData)
+        #expect(model.sqlWorkspace.tabs.isEmpty == false)
 
         // Switching to SQL mode after Table Data restores selected query tab without adding extra tabs
         let initialTab = try #require(model.sqlWorkspace.activeTab)
@@ -430,5 +477,133 @@ struct SavedConnectionsAndUrlTests {
         #expect(model.showingSwitchConnectionAlert == true)
         #expect(model.connectingProfileId == nil)
         model.cancelConnectionSwitch()
+    }
+
+    @Test("Lazy Keychain access: metadata edits never fetch secrets, Replace/Forget preserve safety, and access denial handles cleanly without loops")
+    @MainActor
+    func testLazyKeychainAccessAndCredentialLifecycle() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let profileStore = ConnectionProfileStore(fileURL: dir.appendingPathComponent("profiles.json"))
+        let draftStore = SqlDraftStore(fileURL: dir.appendingPathComponent("sql_drafts.json"))
+        let passwordStore = InMemoryPasswordStore()
+
+        let profileA = ConnectionProfile(name: "Primary", host: "10.0.0.10", database: "app", user: "alice", rememberPassword: true)
+        let profileB = ConnectionProfile(name: "Analytics", host: "10.0.0.20", database: "dw", user: "bob", rememberPassword: true)
+        try profileStore.saveOrUpdateProfile(profileA, markAsConnected: false, markSelected: true)
+        try profileStore.saveOrUpdateProfile(profileB, markAsConnected: false, markSelected: false)
+        try passwordStore.savePassword(profileId: profileA.id, password: "secret-A")
+        try passwordStore.savePassword(profileId: profileB.id, password: "secret-B")
+        passwordStore.resetCounters()
+
+        // 1. Launching WorkspaceModel & opening/browsing ConnectionDialog performs zero secret reads
+        let workspace = WorkspaceModel(
+            profileStore: profileStore,
+            draftStore: draftStore,
+            passwordStore: passwordStore
+        )
+        workspace.sweepGlobalSessionsOnDisconnect = false
+        #expect(passwordStore.counts.secretLookup == 0)
+
+        let dialog = ConnectionDialogModel(
+            profile: profileA,
+            profileStore: profileStore,
+            draftStore: draftStore,
+            passwordStore: passwordStore
+        )
+        #expect(dialog.credentialState == .savedInKeychain)
+        #expect(dialog.password.isEmpty)
+        #expect(passwordStore.counts.secretLookup == 0)
+
+        dialog.selectSavedProfile(profileB.id)
+        #expect(dialog.credentialState == .savedInKeychain)
+        #expect(dialog.password.isEmpty)
+        #expect(passwordStore.counts.secretLookup == 0)
+
+        // 2. Editing non-secret metadata and saving preserves existing Keychain password without reading or deleting it
+        dialog.profileName = "Analytics Renamed"
+        dialog.timeoutSeconds = 25
+        dialog.saveProfileOnly()
+        #expect(passwordStore.counts.secretLookup == 0)
+        #expect(passwordStore.counts.delete == 0)
+        #expect(dialog.credentialState == .savedInKeychain)
+        #expect(try passwordStore.getPassword(profileId: profileB.id) == "secret-B")
+        passwordStore.resetCounters()
+
+        // 3. Explicit Replace and Forget flows
+        dialog.beginReplacingPassword()
+        #expect(dialog.credentialState == .replacing)
+        dialog.cancelReplacingPassword()
+        #expect(dialog.credentialState == .savedInKeychain)
+
+        dialog.markForgetSavedPassword()
+        #expect(dialog.credentialState == .forgetPending)
+        dialog.undoForgetSavedPassword()
+        #expect(dialog.credentialState == .savedInKeychain)
+        #expect(passwordStore.counts.delete == 0)
+
+        dialog.markForgetSavedPassword()
+        dialog.saveProfileOnly()
+        #expect(passwordStore.counts.delete == 1)
+        #expect(dialog.credentialState == .none)
+        #expect(profileStore.profile(for: profileB.id)?.rememberPassword == false)
+
+        // Replace password on A cleanly
+        dialog.selectSavedProfile(profileA.id)
+        dialog.beginReplacingPassword()
+        dialog.password = "rotated-A"
+        dialog.saveProfileOnly()
+        #expect(try passwordStore.getPassword(profileId: profileA.id) == "rotated-A")
+        passwordStore.resetCounters()
+
+        // 4. Keychain denial during explicit Test Connection fails once concisely without prompting loop
+        passwordStore.simulateAccessDenied = true
+        let freshDialogForA = ConnectionDialogModel(
+            profile: profileStore.profile(for: profileA.id)!,
+            profileStore: profileStore,
+            draftStore: draftStore,
+            passwordStore: passwordStore
+        )
+        #expect(passwordStore.counts.secretLookup == 0)
+        await freshDialogForA.runConnectionTest()
+        #expect(passwordStore.counts.secretLookup == 1)
+        #expect(freshDialogForA.testResultIsError == true)
+        #expect(freshDialogForA.testResultMessage?.contains("denied or cancelled") == true)
+        #expect(freshDialogForA.isTesting == false)
+
+        // 5. Keychain denial during quickConnect stops once gracefully without connecting or looping
+        passwordStore.resetCounters()
+        workspace.quickConnect(profile: profileA)
+        #expect(passwordStore.counts.secretLookup == 1)
+        #expect(workspace.connectingProfileId == nil)
+        #expect(workspace.activeConfig == nil)
+        #expect(workspace.quickConnectErrorProfileId == profileA.id)
+        #expect(workspace.quickConnectErrorMessage?.contains("denied or cancelled") == true)
+
+        // 6. Successful quickConnect reads Keychain once, connects into Table Data, and restores drafts silently
+        passwordStore.simulateAccessDenied = false
+        passwordStore.resetCounters()
+        workspace.connectionTester = { config in
+            #expect(config.password == "rotated-A")
+            return "PostgreSQL 16.0"
+        }
+
+        let sqlTabWorkspace = SqlWorkspaceViewModel(draftStore: draftStore)
+        sqlTabWorkspace.activate(profileId: profileA.id)
+        sqlTabWorkspace.tabs[0].sqlText = "SELECT 'background-draft';"
+        sqlTabWorkspace.flushDrafts()
+
+        workspace.quickConnect(profile: profileA)
+        for _ in 0..<250 {
+            if workspace.connectingProfileId == nil && workspace.activeConfig != nil {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(passwordStore.counts.secretLookup == 1)
+        #expect(workspace.activeConfig?.password == "rotated-A")
+        #expect(workspace.currentMode == .tableData)
+        #expect(workspace.sqlWorkspace.tabs.first?.sqlText == "SELECT 'background-draft';")
     }
 }
