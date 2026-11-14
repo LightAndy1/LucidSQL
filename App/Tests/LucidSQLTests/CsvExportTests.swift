@@ -379,7 +379,7 @@ struct CsvExportTests {
             CREATE SCHEMA "\(schemaName)";
             CREATE VIEW "\(schemaName)".slow_export AS
             SELECT g AS id,
-                   CASE WHEN g = 150 THEN pg_sleep(5)::text ELSE 'item_' || g END AS val
+                   CASE WHEN g = 150 THEN pg_sleep(15)::text ELSE 'item_' || g END AS val
             FROM generate_series(1, 300) AS g;
             """,
             queryId: UUID().uuidString
