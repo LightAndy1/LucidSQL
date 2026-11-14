@@ -568,77 +568,11 @@ public struct WorkspaceView: View {
                                         ScrollView {
                                             VStack(spacing: 2) {
                                                 ForEach(model.savedProfiles) { profile in
-                                                    let isSelected = model.selectedProfileId == profile.id
-                                                    HStack(spacing: 10) {
-                                                        Image(systemName: isSelected ? "checkmark.circle.fill" : "cylinder.split.1x2")
-                                                            .font(.system(size: 13))
-                                                            .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-
-                                                        VStack(alignment: .leading, spacing: 2) {
-                                                            HStack(spacing: 6) {
-                                                                Text(profile.name)
-                                                                    .font(.system(size: 13, weight: .medium))
-                                                                    .lineLimit(1)
-                                                                Text(profile.sslMode)
-                                                                    .font(.system(size: 10, weight: .medium))
-                                                                    .foregroundStyle(.secondary)
-                                                                    .padding(.horizontal, 5)
-                                                                    .padding(.vertical, 1)
-                                                                    .background(Color(NSColor.quaternaryLabelColor).opacity(0.25), in: Capsule())
-                                                                if !profile.rememberPassword {
-                                                                    Image(systemName: "key.slash")
-                                                                        .font(.system(size: 10))
-                                                                        .foregroundStyle(.secondary)
-                                                                        .help("Password not stored in Keychain")
-                                                                }
-                                                            }
-                                                            Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
-                                                                .font(.system(size: 11, design: .monospaced))
-                                                                .foregroundStyle(.secondary)
-                                                                .lineLimit(1)
-                                                        }
-
-                                                        Spacer(minLength: 8)
-
-                                                        Button("Edit") {
-                                                            model.openConnectionDialog(selecting: profile)
-                                                        }
-                                                        .controlSize(.small)
-
-                                                        Button("Connect") {
-                                                            model.quickConnect(profile: profile)
-                                                        }
-                                                        .buttonStyle(.borderedProminent)
-                                                        .controlSize(.small)
-                                                    }
-                                                    .padding(.horizontal, 12)
-                                                    .padding(.vertical, 8)
-                                                    .background(
-                                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                            .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+                                                    SavedProfileRowView(
+                                                        profile: profile,
+                                                        isSelected: model.selectedProfileId == profile.id,
+                                                        model: model
                                                     )
-                                                    .contentShape(Rectangle())
-                                                    .onTapGesture {
-                                                        model.selectSavedProfile(profile.id)
-                                                    }
-                                                    .onTapGesture(count: 2) {
-                                                        model.quickConnect(profile: profile)
-                                                    }
-                                                    .contextMenu {
-                                                        Button("Quick Connect") {
-                                                            model.quickConnect(profile: profile)
-                                                        }
-                                                        Button("Edit Connection...") {
-                                                            model.openConnectionDialog(selecting: profile)
-                                                        }
-                                                        Button("Duplicate") {
-                                                            model.duplicateSavedProfile(profile.id)
-                                                        }
-                                                        Divider()
-                                                        Button("Delete...", role: .destructive) {
-                                                            model.requestDeleteSavedProfile(profile)
-                                                        }
-                                                    }
                                                 }
                                             }
                                             .padding(8)
@@ -865,6 +799,85 @@ public struct WorkspaceView: View {
         } message: {
             if let profile = model.profilePendingDelete {
                 Text("Delete \"\(profile.name)\" (\(profile.host):\(profile.port))? This removes the profile, its Keychain password, and any saved SQL drafts for it.")
+            }
+        }
+    }
+}
+
+private struct SavedProfileRowView: View {
+    let profile: ConnectionProfile
+    let isSelected: Bool
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "cylinder.split.1x2")
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(profile.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Text(profile.sslMode)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color(NSColor.quaternaryLabelColor).opacity(0.25), in: Capsule())
+                    if !profile.rememberPassword {
+                        Image(systemName: "key.slash")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .help("Password not stored in Keychain")
+                    }
+                }
+                Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Edit") {
+                model.openConnectionDialog(selecting: profile)
+            }
+            .controlSize(.small)
+
+            Button("Connect") {
+                model.quickConnect(profile: profile)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.selectSavedProfile(profile.id)
+        }
+        .onTapGesture(count: 2) {
+            model.quickConnect(profile: profile)
+        }
+        .contextMenu {
+            Button("Quick Connect") {
+                model.quickConnect(profile: profile)
+            }
+            Button("Edit Connection...") {
+                model.openConnectionDialog(selecting: profile)
+            }
+            Button("Duplicate") {
+                model.duplicateSavedProfile(profile.id)
+            }
+            Divider()
+            Button("Delete...", role: .destructive) {
+                model.requestDeleteSavedProfile(profile)
             }
         }
     }
