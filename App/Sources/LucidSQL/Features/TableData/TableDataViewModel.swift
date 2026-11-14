@@ -503,6 +503,9 @@ public final class TableDataViewModel: @unchecked Sendable {
             self.dataVersion &+= 1
             self.isLoading = false
         } catch is CancellationError {
+            if requestGen == self.loadGeneration {
+                self.isLoading = false
+            }
             return
         } catch {
             guard !Task.isCancelled,

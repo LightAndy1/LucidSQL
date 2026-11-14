@@ -35,6 +35,7 @@ final class ConnectionDialogModel: ObservableObject {
     private let draftStore: SqlDraftStore
     private let passwordStore: any PasswordStoring
     private let activeConnectedProfileId: UUID?
+    private let clipboardReader: () -> String?
     private let onProfilesChanged: (() -> Void)?
 
     private var editingProfileId: UUID
@@ -46,12 +47,14 @@ final class ConnectionDialogModel: ObservableObject {
         profileStore: ConnectionProfileStore = ConnectionProfileStore(),
         draftStore: SqlDraftStore = SqlDraftStore(),
         passwordStore: any PasswordStoring = KeychainPasswordStore.shared,
+        clipboardReader: @escaping () -> String? = { NSPasteboard.general.string(forType: .string) },
         onProfilesChanged: (() -> Void)? = nil
     ) {
         self.profileStore = profileStore
         self.draftStore = draftStore
         self.passwordStore = passwordStore
         self.activeConnectedProfileId = activeConnectedProfileId
+        self.clipboardReader = clipboardReader
         self.onProfilesChanged = onProfilesChanged
 
         let allProfiles = profileStore.loadProfiles()
@@ -89,6 +92,23 @@ final class ConnectionDialogModel: ObservableObject {
 
     var requiresCaVerification: Bool {
         sslMode == "verify-ca" || sslMode == "verify-full"
+    }
+
+    var sslModeShortStatus: String {
+        switch sslMode {
+        case "disable":
+            return "Unencrypted connection"
+        case "prefer":
+            return "TLS if available; certificate not verified"
+        case "require":
+            return "TLS required; certificate not verified"
+        case "verify-ca":
+            return "TLS required; verifies CA"
+        case "verify-full":
+            return "TLS required; verifies CA and hostname"
+        default:
+            return "Custom SSL mode"
+        }
     }
 
     var sslModeSummary: String {
@@ -232,33 +252,54 @@ final class ConnectionDialogModel: ObservableObject {
     func importConnectionUrl() {
         do {
             let parsed = try PostgresUrlParser.parse(connectionUrlInput)
-            host = parsed.host
-            port = String(parsed.port)
-            database = parsed.database
-            user = parsed.user
-            password = parsed.password ?? ""
-            sslMode = parsed.sslMode ?? "prefer"
-            sslRootCertPath = parsed.sslRootCert ?? ""
-            timeoutSeconds = Int(max(1, min(300, parsed.timeoutSeconds ?? 10)))
-
-            let trimmedName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedName.isEmpty
-                || trimmedName == "Local PostgreSQL"
-                || trimmedName == "New PostgreSQL"
-                || trimmedName == "PostgreSQL" {
-                profileName = "\(parsed.database) @ \(parsed.host)"
-            }
-
-            // Clear credential-bearing URI immediately after successful parse
-            connectionUrlInput = ""
-            urlImportMessage = "Imported URL settings into fields below (URI cleared)."
-            urlImportIsError = false
-            testResultMessage = nil
-            testResultIsError = false
+            applyParsedUrl(parsed)
         } catch {
             urlImportMessage = error.localizedDescription
             urlImportIsError = true
         }
+    }
+
+    func pasteAndImportConnectionUrl() {
+        guard let raw = clipboardReader()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            urlImportMessage = "Clipboard is empty."
+            urlImportIsError = true
+            return
+        }
+
+        do {
+            let parsed = try PostgresUrlParser.parse(raw)
+            applyParsedUrl(parsed)
+        } catch {
+            urlImportMessage = error.localizedDescription
+            urlImportIsError = true
+        }
+    }
+
+    private func applyParsedUrl(_ parsed: ParsedPostgresUrl) {
+        host = parsed.host
+        port = String(parsed.port)
+        database = parsed.database
+        user = parsed.user
+        password = parsed.password ?? ""
+        sslMode = parsed.sslMode ?? "prefer"
+        sslRootCertPath = parsed.sslRootCert ?? ""
+        timeoutSeconds = Int(max(1, min(300, parsed.timeoutSeconds ?? 10)))
+
+        let trimmedName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty
+            || trimmedName == "Local PostgreSQL"
+            || trimmedName == "New PostgreSQL"
+            || trimmedName == "PostgreSQL" {
+            profileName = "\(parsed.database) @ \(parsed.host)"
+        }
+
+        // Clear credential-bearing URI immediately after successful parse
+        connectionUrlInput = ""
+        urlImportMessage = "Connection fields populated (URI cleared)."
+        urlImportIsError = false
+        testResultMessage = nil
+        testResultIsError = false
     }
 
     func clearSensitiveTransientInputs() {
@@ -389,10 +430,10 @@ public struct ConnectionDialogView: View {
                         .foregroundStyle(Color.accentColor)
                 }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("PostgreSQL Connections")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Connections")
                         .font(.system(size: 16, weight: .semibold))
-                    Text("Select a saved profile, import a postgres:// URL, or configure credentials")
+                    Text("Saved profiles and PostgreSQL connection settings")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -427,16 +468,11 @@ public struct ConnectionDialogView: View {
                     Divider()
 
                     if model.savedProfiles.isEmpty {
-                        VStack(spacing: 8) {
+                        VStack(spacing: 6) {
                             Spacer()
                             Text("No Saved Profiles")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.secondary)
-                            Text("Save or connect a profile to reuse it here.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 14)
                             Spacer()
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -455,7 +491,7 @@ public struct ConnectionDialogView: View {
                                         Text(profile.name)
                                             .font(.system(size: 12, weight: .medium))
                                             .lineLimit(1)
-                                        Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
+                                        Text("\(profile.user)@\(profile.host):\(String(profile.port))/\(profile.database)")
                                             .font(.system(size: 10, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
@@ -541,19 +577,31 @@ public struct ConnectionDialogView: View {
                         VStack(alignment: .leading, spacing: 18) {
                             // URL Import Section
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("IMPORT CONNECTION URL")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 5) {
+                                    Text("CONNECTION URL")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "info.circle")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.tertiary)
+                                        .help("Supports postgres:// and postgresql://. Parsed locally, never logged or saved, and cleared on import.")
+                                }
 
                                 HStack(spacing: 8) {
-                                    SecureField("postgres://user:password@host:5432/database?sslmode=verify-full", text: $model.connectionUrlInput)
+                                    SecureField("postgres://user:password@host:5432/db", text: $model.connectionUrlInput)
                                         .textFieldStyle(.roundedBorder)
                                         .controlSize(.regular)
                                         .onSubmit {
                                             model.importConnectionUrl()
                                         }
 
-                                    Button("Import URL") {
+                                    Button("Paste") {
+                                        model.pasteAndImportConnectionUrl()
+                                    }
+                                    .controlSize(.regular)
+                                    .help("Paste and parse a PostgreSQL URL from the clipboard")
+
+                                    Button("Import") {
                                         model.importConnectionUrl()
                                     }
                                     .controlSize(.regular)
@@ -565,10 +613,6 @@ public struct ConnectionDialogView: View {
                                         .font(.system(size: 11))
                                         .foregroundStyle(model.urlImportIsError ? .red : .green)
                                         .fixedSize(horizontal: false, vertical: true)
-                                } else {
-                                    Text("Supports postgres:// and postgresql://. Parsed locally, never logged or saved, and cleared on import.")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .padding(12)
@@ -663,14 +707,14 @@ public struct ConnectionDialogView: View {
                                             .font(.system(size: 13))
                                             .foregroundStyle(.secondary)
                                         VStack(alignment: .leading, spacing: 6) {
-                                            SecureField("Required if authentication enabled", text: $model.password)
+                                            SecureField("Optional", text: $model.password)
                                                 .textFieldStyle(.roundedBorder)
                                                 .controlSize(.regular)
                                             Toggle("Remember password in macOS Keychain", isOn: $model.rememberPassword)
                                                 .toggleStyle(.checkbox)
                                                 .font(.system(size: 12))
                                             if !model.rememberPassword {
-                                                Text("Password stays in memory only for this session and is removed from Keychain on Save/Connect.")
+                                                Text("Session-only; removed from Keychain on save.")
                                                     .font(.system(size: 11))
                                                     .foregroundStyle(.secondary)
                                                     .fixedSize(horizontal: false, vertical: true)
@@ -693,7 +737,7 @@ public struct ConnectionDialogView: View {
                                             .font(.system(size: 13))
                                             .foregroundStyle(.secondary)
                                         VStack(alignment: .leading, spacing: 4) {
-                                            HStack {
+                                            HStack(spacing: 8) {
                                                 Picker("", selection: $model.sslMode) {
                                                     Text("Disable").tag("disable")
                                                     Text("Prefer").tag("prefer")
@@ -704,11 +748,17 @@ public struct ConnectionDialogView: View {
                                                 .labelsHidden()
                                                 .pickerStyle(.menu)
                                                 .frame(width: 150)
+
+                                                Image(systemName: "info.circle")
+                                                    .font(.system(size: 12))
+                                                    .foregroundStyle(.secondary)
+                                                    .help(model.sslModeSummary)
+
                                                 Spacer(minLength: 0)
                                             }
-                                            Text(model.sslModeSummary)
+                                            Text(model.sslModeShortStatus)
                                                 .font(.system(size: 11))
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(model.sslMode == "disable" ? Color.orange : Color.secondary)
                                                 .fixedSize(horizontal: false, vertical: true)
                                         }
                                     }
@@ -720,7 +770,7 @@ public struct ConnectionDialogView: View {
                                                 .font(.system(size: 13))
                                                 .foregroundStyle(.secondary)
                                             HStack(spacing: 6) {
-                                                TextField("System root certificates (optional PEM path)", text: $model.sslRootCertPath)
+                                                TextField("System roots (optional PEM path)", text: $model.sslRootCertPath)
                                                     .textFieldStyle(.roundedBorder)
                                                     .controlSize(.regular)
                                                 Button("Browse...") {
@@ -828,7 +878,7 @@ public struct ConnectionDialogView: View {
                 }
             }
         }
-        .frame(width: 800, height: 700)
+        .frame(width: 740, height: 560)
         .background(VisualEffectBackground(material: .sheet, blendingMode: .behindWindow))
         .onDisappear {
             model.clearSensitiveTransientInputs()
@@ -845,7 +895,7 @@ public struct ConnectionDialogView: View {
             }
         } message: {
             if let profile = model.profilePendingDelete {
-                Text("Delete \"\(profile.name)\" (\(profile.host):\(profile.port))? This removes the profile, its Keychain password, and any saved SQL drafts for it.")
+                Text("Delete \"\(profile.name)\" (\(profile.host):\(profile.port))? Removes the profile, Keychain password, and saved SQL drafts.")
             }
         }
     }
@@ -867,7 +917,7 @@ public struct ConnectionDialogView: View {
     private func quickConnectFromSidebar(_ profile: ConnectionProfile) {
         model.selectSavedProfile(profile.id)
         if !profile.rememberPassword && model.password.isEmpty {
-            model.testResultMessage = "Password is not stored in Keychain for \"\(profile.name)\". Enter your password and click Connect (or Connect without password)."
+            model.testResultMessage = "Enter password for \"\(profile.name)\" and click Connect."
             model.testResultIsError = false
             return
         }

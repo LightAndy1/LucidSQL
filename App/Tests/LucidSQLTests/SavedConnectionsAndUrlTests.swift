@@ -244,4 +244,181 @@ struct SavedConnectionsAndUrlTests {
         #expect(model.activeConfig?.database == "db_b")
         #expect(model.tableViewModel.hasPendingChanges == false)
     }
+
+    @Test("Connection URL Paste button reads clipboard only on click, clears URI, never auto-connects/saves, and handles invalid/empty safely")
+    @MainActor
+    func testConnectionUrlPasteButtonBehavior() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let profilesURL = dir.appendingPathComponent("profiles.json")
+        let profileStore = ConnectionProfileStore(fileURL: profilesURL)
+        let draftStore = SqlDraftStore(fileURL: dir.appendingPathComponent("drafts.json"))
+        let passwordStore = InMemoryPasswordStore()
+
+        var clipboardValue: String? = "postgresql://paste_user:MySecretPw%21@db.paste.internal:5438/analytics?sslmode=verify-full"
+        var readCount = 0
+
+        let dialogModel = ConnectionDialogModel(
+            profile: ConnectionProfile(name: "Local PostgreSQL"),
+            profileStore: profileStore,
+            draftStore: draftStore,
+            passwordStore: passwordStore,
+            clipboardReader: {
+                readCount += 1
+                return clipboardValue
+            }
+        )
+
+        // Clipboard must NOT be read on initialization
+        #expect(readCount == 0)
+
+        // Clicking Paste reads clipboard once, populates fields, clears URI, and does NOT save or connect
+        dialogModel.pasteAndImportConnectionUrl()
+        #expect(readCount == 1)
+        #expect(dialogModel.urlImportIsError == false)
+        #expect(dialogModel.connectionUrlInput.isEmpty)
+        #expect(dialogModel.host == "db.paste.internal")
+        #expect(dialogModel.port == "5438")
+        #expect(dialogModel.database == "analytics")
+        #expect(dialogModel.user == "paste_user")
+        #expect(dialogModel.password == "MySecretPw!")
+        #expect(dialogModel.sslMode == "verify-full")
+        #expect(profileStore.loadProfiles().isEmpty)
+        #expect(passwordStore.allStoredCount == 0)
+
+        // Empty clipboard gives concise feedback and preserves existing fields
+        clipboardValue = "   \n  "
+        dialogModel.pasteAndImportConnectionUrl()
+        #expect(readCount == 2)
+        #expect(dialogModel.urlImportIsError == true)
+        #expect(dialogModel.urlImportMessage == "Clipboard is empty.")
+        #expect(dialogModel.host == "db.paste.internal")
+        #expect(dialogModel.password == "MySecretPw!")
+
+        // Invalid clipboard content with secret never leaks secret and preserves existing fields
+        let secret = "TopSecretClipboardToken987"
+        clipboardValue = "mysql://admin:\(secret)@bad.example.com:3306/db"
+        dialogModel.pasteAndImportConnectionUrl()
+        #expect(readCount == 3)
+        #expect(dialogModel.urlImportIsError == true)
+        #expect(dialogModel.connectionUrlInput.isEmpty)
+        #expect(!(dialogModel.urlImportMessage ?? "").contains(secret))
+        #expect(dialogModel.host == "db.paste.internal")
+    }
+
+    @Test("Quick-connect protects against repeated clicks, reports errors cleanly, and enforces safeguards when switching")
+    @MainActor
+    func testQuickConnectProgressRepeatProtectionAndSafeguards() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let suiteName = "com.lucidsql.tests.quickconnect.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let privacy = PrivacyPreferencesStore(userDefaults: userDefaults)
+        privacy.setSqlDraftPersistenceEnabled(false)
+
+        let profileStore = ConnectionProfileStore(fileURL: dir.appendingPathComponent("profiles.json"))
+        let passwordStore = InMemoryPasswordStore()
+        let profileA = ConnectionProfile(name: "Primary", host: "db-a.local", port: 5432, database: "app_a", user: "alice")
+        let profileB = ConnectionProfile(name: "Replica", host: "db-b.local", port: 5433, database: "app_b", user: "bob")
+        try profileStore.saveOrUpdateProfile(profileA, markAsConnected: false, markSelected: false)
+        try profileStore.saveOrUpdateProfile(profileB, markAsConnected: false, markSelected: false)
+
+        let model = WorkspaceModel(
+            profileStore: profileStore,
+            draftStore: SqlDraftStore(fileURL: dir.appendingPathComponent("drafts.json")),
+            passwordStore: passwordStore,
+            privacyPreferences: privacy
+        )
+        model.sweepGlobalSessionsOnDisconnect = false
+
+        final class MockConnectionProbe: @unchecked Sendable {
+            private let lock = NSLock()
+            var testCalls = 0
+            var shouldFail = false
+
+            func recordCallAndCheckShouldFail() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                testCalls += 1
+                return shouldFail
+            }
+
+            func setShouldFail(_ value: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                shouldFail = value
+            }
+
+            var callsCount: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return testCalls
+            }
+        }
+
+        let probe = MockConnectionProbe()
+        model.connectionTester = { _ in
+            let fail = probe.recordCallAndCheckShouldFail()
+            try await Task.sleep(for: .milliseconds(80))
+            if fail {
+                throw LucidError.ConnectionFailed(reason: "connection refused")
+            }
+            return "PostgreSQL 16.0"
+        }
+
+        // Rapid double click on A must only trigger one connection attempt
+        model.quickConnect(profile: profileA)
+        #expect(model.connectingProfileId == profileA.id)
+        model.quickConnect(profile: profileA)
+        model.quickConnect(profile: profileB)
+        #expect(model.connectingProfileId == profileA.id)
+
+        try await Task.sleep(for: .milliseconds(160))
+        #expect(probe.callsCount == 1)
+        #expect(model.connectingProfileId == nil)
+        #expect(model.activeProfile?.id == profileA.id)
+        #expect(model.currentMode == .sqlEditor)
+
+        // Switching to SQL mode after Table Data restores selected query tab without adding extra tabs
+        let initialTab = try #require(model.sqlWorkspace.activeTab)
+        let secondTab = model.sqlWorkspace.createTab(title: "Analytics")
+        #expect(model.sqlWorkspace.tabs.count == 2)
+        #expect(model.sqlWorkspace.activeTab?.id == secondTab.id)
+        model.currentMode = .tableData
+        model.currentMode = .sqlEditor
+        #expect(model.sqlWorkspace.tabs.count == 2)
+        #expect(model.sqlWorkspace.activeTab?.id == secondTab.id)
+        #expect(initialTab.id != secondTab.id)
+
+        // Failing quick-connect keeps existing connection intact and records concise error
+        probe.setShouldFail(true)
+        model.quickConnect(profile: profileB)
+        #expect(model.connectingProfileId == profileB.id)
+        try await Task.sleep(for: .milliseconds(160))
+        #expect(model.connectingProfileId == nil)
+        #expect(model.activeProfile?.id == profileA.id)
+        #expect(model.quickConnectErrorProfileId == profileB.id)
+        #expect(model.quickConnectErrorMessage?.contains("connection refused") == true)
+        #expect(model.showingQuickConnectErrorAlert == true)
+        model.clearQuickConnectError()
+
+        // With staged edits, quickConnect must trigger switch-connection safeguard immediately
+        probe.setShouldFail(false)
+        model.tableViewModel.currentSchema = "public"
+        model.tableViewModel.currentTable = "items"
+        model.tableViewModel.columns = [
+            ColumnMetadata(name: "id", ordinalPosition: 1, pgTypeName: "int4", pgTypeOid: 23, isPrimaryKey: true, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+            ColumnMetadata(name: "name", ordinalPosition: 2, pgTypeName: "text", pgTypeOid: 25, isPrimaryKey: false, isNullable: false, defaultValue: nil, isGenerated: false, isIdentity: false, isIdentityAlways: false),
+        ]
+        model.tableViewModel.rows = [RowData(cells: [.text("1"), .integer(1), .text("a")])]
+        model.tableViewModel.stageTextEdit(row: 0, column: 1, text: "b")
+        model.quickConnect(profile: profileB)
+        #expect(model.showingSwitchConnectionAlert == true)
+        #expect(model.connectingProfileId == nil)
+        model.cancelConnectionSwitch()
+    }
 }

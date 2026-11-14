@@ -3,7 +3,7 @@ import AppKit
 import LucidSQL
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     var window: NSWindow?
     let workspaceModel = WorkspaceModel()
 
@@ -60,7 +60,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
-        let connectionsItem = NSMenuItem(title: "Connections...", action: #selector(openConnectionsSheet), keyEquivalent: "O")
+        let newConnectionItem = NSMenuItem(title: "New Connection...", action: #selector(newConnection), keyEquivalent: "n")
+        newConnectionItem.target = self
+        fileMenu.addItem(newConnectionItem)
+        let newQueryTabItem = NSMenuItem(title: "New Query Tab", action: #selector(newQueryTab), keyEquivalent: "t")
+        newQueryTabItem.target = self
+        fileMenu.addItem(newQueryTabItem)
+        fileMenu.addItem(.separator())
+        let connectionsItem = NSMenuItem(title: "Manage Connections...", action: #selector(openConnectionsSheet), keyEquivalent: "O")
         connectionsItem.target = self
         fileMenu.addItem(connectionsItem)
         fileMenu.addItem(.separator())
@@ -105,8 +112,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         workspaceModel.isShowingSettingsSheet = true
     }
 
+    @objc private func newConnection() {
+        workspaceModel.openConnectionDialog(startNew: true)
+    }
+
+    @objc private func newQueryTab() {
+        workspaceModel.openNewSqlTab()
+    }
+
     @objc private func openConnectionsSheet() {
         workspaceModel.openConnectionDialog()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(newQueryTab) {
+            return workspaceModel.activeConfig != nil
+        }
+        return true
     }
 
     private func confirmLifecycleExit(title: String, actionVerb: String, primaryButtonTitle: String) -> Bool {

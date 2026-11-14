@@ -29,6 +29,10 @@ public final class WorkspaceModel: ObservableObject {
     @Published public var showingTableNavigationAlert: Bool = false
     @Published public var tableNavigationWarningMessage: String = ""
     @Published public var isShowingSettingsSheet: Bool = false
+    @Published public var connectingProfileId: UUID? = nil
+    @Published public var quickConnectErrorProfileId: UUID? = nil
+    @Published public var quickConnectErrorMessage: String? = nil
+    @Published public var showingQuickConnectErrorAlert: Bool = false
 
     public var tableViewModel = TableDataViewModel()
     public let sqlWorkspace: SqlWorkspaceViewModel
@@ -37,10 +41,14 @@ public final class WorkspaceModel: ObservableObject {
     public let passwordStore: any PasswordStoring
     public let privacyPreferences: PrivacyPreferencesStore
     public var sweepGlobalSessionsOnDisconnect: Bool = true
+    public var connectionTester: @Sendable (ConnectionConfig) async throws -> String = { config in
+        try await test_database_connection(config: config)
+    }
 
     private var terminateObserver: NSObjectProtocol? = nil
     private var pendingTableNavigationAction: (() -> Void)? = nil
     private var pendingConnectionSwitch: (profile: ConnectionProfile, password: String?)? = nil
+    private var quickConnectTask: Task<Void, Never>? = nil
 
     public var sqlEditorViewModel: SqlEditorViewModel {
         sqlWorkspace.activeTab ?? SqlEditorViewModel()
@@ -132,6 +140,8 @@ public final class WorkspaceModel: ObservableObject {
         startNew: Bool = false,
         notice: String? = nil
     ) {
+        cancelInFlightQuickConnect()
+        clearQuickConnectError()
         if startNew {
             initialDialogProfile = ConnectionProfile(name: "New PostgreSQL")
         } else if let profile {
@@ -144,18 +154,73 @@ public final class WorkspaceModel: ObservableObject {
         isShowingConnectionSheet = true
     }
 
+    public func clearQuickConnectError() {
+        quickConnectErrorProfileId = nil
+        quickConnectErrorMessage = nil
+        showingQuickConnectErrorAlert = false
+    }
+
+    private func cancelInFlightQuickConnect() {
+        quickConnectTask?.cancel()
+        quickConnectTask = nil
+        connectingProfileId = nil
+    }
+
     public func quickConnect(profile: ConnectionProfile) {
+        guard connectingProfileId == nil else { return }
+        if activeConfig != nil, activeProfile?.id == profile.id {
+            return
+        }
+
         selectSavedProfile(profile.id)
+        clearQuickConnectError()
+
         if !profile.rememberPassword {
             openConnectionDialog(
                 selecting: profile,
-                notice: "Password is not remembered for \"\(profile.name)\". Enter your password to connect (or click Connect if none is required)."
+                notice: "Enter password for \"\(profile.name)\"."
             )
             return
         }
+
         let storedPassword = (try? passwordStore.getPassword(profileId: profile.id)) ?? nil
         let resolvedPassword = (storedPassword?.isEmpty == false) ? storedPassword : nil
-        requestConnection(profile, password: resolvedPassword)
+
+        if activeConfig != nil && !lifecycleSummary.isEmpty {
+            requestConnection(profile, password: resolvedPassword)
+            return
+        }
+
+        connectingProfileId = profile.id
+        let config = profile.toRustConfig(password: resolvedPassword)
+        let tester = connectionTester
+
+        quickConnectTask = Task { @MainActor [weak self, profile, resolvedPassword] in
+            guard let self else { return }
+            do {
+                _ = try await tester(config)
+                guard !Task.isCancelled else { return }
+                self.connectingProfileId = nil
+                self.quickConnectTask = nil
+                if self.activeConfig != nil {
+                    await self.performConfirmedConnectionSwitch(to: profile, password: resolvedPassword)
+                } else {
+                    self.connect(profile: profile, password: resolvedPassword)
+                }
+            } catch is CancellationError {
+                self.connectingProfileId = nil
+                self.quickConnectTask = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.connectingProfileId = nil
+                self.quickConnectTask = nil
+                self.quickConnectErrorProfileId = profile.id
+                self.quickConnectErrorMessage = error.userFacingMessage
+                if self.activeConfig != nil {
+                    self.showingQuickConnectErrorAlert = true
+                }
+            }
+        }
     }
 
     public func duplicateSavedProfile(_ id: UUID) {
@@ -231,6 +296,8 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func connect(profile: ConnectionProfile, password: String?) {
+        cancelInFlightQuickConnect()
+        clearQuickConnectError()
         try? profileStore.saveOrUpdateProfile(profile, markAsConnected: true, markSelected: true)
         refreshSavedProfiles()
         self.selectedProfileId = profile.id
@@ -400,6 +467,8 @@ public final class WorkspaceModel: ObservableObject {
     }
 
     public func performConfirmedDisconnect() async {
+        cancelInFlightQuickConnect()
+        clearQuickConnectError()
         showingDisconnectSessionWarning = false
         disconnectWarningMessage = ""
         showingTableNavigationAlert = false
@@ -441,6 +510,7 @@ public struct WorkspaceView: View {
                     SchemaTreeView(
                         config: config,
                         activeTableKey: model.selectedTable,
+                        tableViewModel: model.tableViewModel,
                         onOpenSqlEditor: {
                             model.currentMode = .sqlEditor
                         }
@@ -452,17 +522,16 @@ public struct WorkspaceView: View {
                     .id(model.activeConnectionSessionToken)
                 } else {
                     // Quiet Disconnected Sidebar
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("SCHEMAS & TABLES")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 16)
                             .padding(.top, 16)
 
-                        Text("Connect to a PostgreSQL database to inspect schemas, tables, and views.")
+                        Text("Connect to browse schemas and tables.")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
-                            .lineSpacing(2)
                             .padding(.horizontal, 16)
 
                         Spacer()
@@ -510,112 +579,7 @@ public struct WorkspaceView: View {
                         }
                     }
                 } else {
-                    // Clean Translucent Welcome Pane
-                    VStack(spacing: 28) {
-                        Spacer()
-
-                        Image(systemName: "cylinder.split.1x2.fill")
-                            .font(.system(size: 58))
-                            .foregroundStyle(Color.accentColor)
-
-                        VStack(spacing: 8) {
-                            Text("LucidSQL")
-                                .font(.system(size: 34, weight: .bold))
-
-                            Text(model.activeConfig == nil
-                                 ? "Fast, safe native PostgreSQL client for macOS"
-                                 : "Select a table or view from the sidebar to inspect records")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if model.activeConfig == nil {
-                            if model.savedProfiles.isEmpty {
-                                VStack(spacing: 14) {
-                                    PrimaryActionButton(
-                                        title: "New Connection",
-                                        icon: "plus",
-                                        size: .extraLarge
-                                    ) {
-                                        model.openConnectionDialog(startNew: true)
-                                    }
-                                    .keyboardShortcut("n", modifiers: [.command])
-
-                                    KeyboardBadge(keys: ["⌘", "N"], label: "New Connection")
-                                }
-                                .padding(.top, 4)
-                            } else {
-                                VStack(spacing: 14) {
-                                    VStack(spacing: 0) {
-                                        HStack {
-                                            Text("SAVED CONNECTIONS")
-                                                .font(.system(size: 11, weight: .bold))
-                                                .foregroundStyle(.secondary)
-                                            Spacer()
-                                            Button {
-                                                model.openConnectionDialog(selecting: model.selectedSavedProfile)
-                                            } label: {
-                                                Text("Manage...")
-                                                    .font(.system(size: 11))
-                                            }
-                                            .buttonStyle(.borderless)
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 10)
-
-                                        Divider()
-
-                                        ScrollView {
-                                            VStack(spacing: 2) {
-                                                ForEach(model.savedProfiles) { profile in
-                                                    SavedProfileRowView(
-                                                        profile: profile,
-                                                        isSelected: model.selectedProfileId == profile.id,
-                                                        model: model
-                                                    )
-                                                }
-                                            }
-                                            .padding(8)
-                                        }
-                                        .frame(maxHeight: 220)
-                                    }
-                                    .frame(width: 520)
-                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .strokeBorder(Color(NSColor.separatorColor).opacity(0.4), lineWidth: 0.5)
-                                    )
-
-                                    HStack(spacing: 12) {
-                                        if let selected = model.selectedSavedProfile {
-                                            PrimaryActionButton(
-                                                title: "Connect Selected",
-                                                icon: "bolt.fill",
-                                                size: .large
-                                            ) {
-                                                model.quickConnect(profile: selected)
-                                            }
-                                        }
-
-                                        SecondaryActionButton(
-                                            title: "New Connection",
-                                            icon: "plus",
-                                            size: .large
-                                        ) {
-                                            model.openConnectionDialog(startNew: true)
-                                        }
-                                        .keyboardShortcut("n", modifiers: [.command])
-                                    }
-
-                                    KeyboardBadge(keys: ["⌘", "N"], label: "New Connection")
-                                }
-                                .padding(.top, 4)
-                            }
-                        }
-
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    WelcomeView(model: model)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -710,85 +674,256 @@ public struct WorkspaceView: View {
                 Text("Delete \"\(profile.name)\" (\(profile.host):\(profile.port))? This removes the profile, its Keychain password, and any saved SQL drafts for it.")
             }
         }
+        .alert("Connection Failed", isPresented: $model.showingQuickConnectErrorAlert) {
+            if let failedId = model.quickConnectErrorProfileId,
+               let failedProfile = model.savedProfiles.first(where: { $0.id == failedId }) {
+                Button("Edit Connection…") {
+                    model.openConnectionDialog(selecting: failedProfile)
+                }
+            }
+            Button("OK", role: .cancel) {
+                model.clearQuickConnectError()
+            }
+        } message: {
+            Text(model.quickConnectErrorMessage ?? "Could not connect to PostgreSQL.")
+        }
+    }
+}
+
+@MainActor
+private final class WelcomeHoverState: ObservableObject {
+    @Published var hoveredProfileId: UUID? = nil
+}
+
+private struct WelcomeView: View {
+    @ObservedObject var model: WorkspaceModel
+    @StateObject private var hoverState = WelcomeHoverState()
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Spacer(minLength: 20)
+
+            VStack(spacing: 10) {
+                Image(systemName: "cylinder.split.1x2.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color.accentColor)
+
+                Text("LucidSQL")
+                    .font(.system(size: 30, weight: .bold))
+
+                Text("PostgreSQL client for macOS")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+
+            if model.savedProfiles.isEmpty {
+                PrimaryActionButton(
+                    title: "New Connection",
+                    icon: "plus",
+                    size: .large
+                ) {
+                    model.openConnectionDialog(startNew: true)
+                }
+                .padding(.top, 4)
+            } else {
+                VStack(spacing: 14) {
+                    savedConnectionsList
+                        .frame(maxWidth: 360)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(Color(NSColor.separatorColor).opacity(0.35), lineWidth: 0.5)
+                        )
+
+                    if let errorMsg = model.quickConnectErrorMessage {
+                        HStack(alignment: .center, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.red)
+                            Text(errorMsg)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.red)
+                                .lineLimit(2)
+                            Spacer(minLength: 4)
+                            if let failedId = model.quickConnectErrorProfileId,
+                               let failedProfile = model.savedProfiles.first(where: { $0.id == failedId }) {
+                                Button("Edit…") {
+                                    model.openConnectionDialog(selecting: failedProfile)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                            }
+                            Button {
+                                model.clearQuickConnectError()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: 360)
+                        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    VStack(spacing: 8) {
+                        PrimaryActionButton(
+                            title: "New Connection",
+                            icon: "plus",
+                            size: .large
+                        ) {
+                            model.openConnectionDialog(startNew: true)
+                        }
+
+                        Button("Manage Connections…") {
+                            model.openConnectionDialog(selecting: model.selectedSavedProfile)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Spacer(minLength: 20)
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var savedConnectionsList: some View {
+        let rows = VStack(spacing: 2) {
+            ForEach(model.savedProfiles) { profile in
+                SavedProfileRowView(
+                    profile: profile,
+                    model: model,
+                    hoverState: hoverState
+                )
+            }
+        }
+        .padding(6)
+
+        if model.savedProfiles.count <= 5 {
+            rows
+        } else {
+            ScrollView {
+                rows
+            }
+            .frame(height: 216)
+        }
     }
 }
 
 private struct SavedProfileRowView: View {
     let profile: ConnectionProfile
-    let isSelected: Bool
     @ObservedObject var model: WorkspaceModel
+    @ObservedObject var hoverState: WelcomeHoverState
+
+    private var isHovered: Bool {
+        hoverState.hoveredProfileId == profile.id
+    }
+
+    private var isConnectingThis: Bool {
+        model.connectingProfileId == profile.id
+    }
+
+    private var isAnyConnecting: Bool {
+        model.connectingProfileId != nil
+    }
+
+    private var isSelected: Bool {
+        model.selectedProfileId == profile.id
+    }
+
+    private var hostSummary: String {
+        profile.port == 5432 ? profile.host : "\(profile.host):\(profile.port)"
+    }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "cylinder.split.1x2")
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+        Button {
+            model.quickConnect(profile: profile)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "cylinder.split.1x2")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isConnectingThis ? Color.accentColor : .secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(profile.name)
                         .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(profile.sslMode)
-                        .font(.system(size: 10, weight: .medium))
+                        .truncationMode(.tail)
+
+                    Text(hostSummary)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color(NSColor.quaternaryLabelColor).opacity(0.25), in: Capsule())
-                    if !profile.rememberPassword {
-                        Image(systemName: "key.slash")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .help("Password not stored in Keychain")
-                    }
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                if isConnectingThis {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if !profile.rememberPassword {
+                    Image(systemName: "key.slash")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .help("Password not stored in Keychain")
+                }
             }
-
-            Spacer(minLength: 8)
-
-            Button("Edit") {
-                model.openConnectionDialog(selecting: profile)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(rowBackgroundColor)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isAnyConnecting)
+        .opacity(isAnyConnecting && !isConnectingThis ? 0.55 : 1.0)
+        .onHover { hovering in
+            if hovering {
+                hoverState.hoveredProfileId = profile.id
+            } else if hoverState.hoveredProfileId == profile.id {
+                hoverState.hoveredProfileId = nil
             }
-            .controlSize(.small)
-
+        }
+        .contextMenu {
             Button("Connect") {
                 model.quickConnect(profile: profile)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            model.selectSavedProfile(profile.id)
-        }
-        .onTapGesture(count: 2) {
-            model.quickConnect(profile: profile)
-        }
-        .contextMenu {
-            Button("Quick Connect") {
-                model.quickConnect(profile: profile)
-            }
-            Button("Edit Connection...") {
+            .disabled(isAnyConnecting)
+            Button("Edit…") {
                 model.openConnectionDialog(selecting: profile)
             }
             Button("Duplicate") {
                 model.duplicateSavedProfile(profile.id)
             }
             Divider()
-            Button("Delete...", role: .destructive) {
+            Button("Delete…", role: .destructive) {
                 model.requestDeleteSavedProfile(profile)
             }
         }
+    }
+
+    private var rowBackgroundColor: Color {
+        if isConnectingThis {
+            return Color.accentColor.opacity(0.12)
+        }
+        if isHovered && !isAnyConnecting {
+            return Color.primary.opacity(0.06)
+        }
+        if isSelected {
+            return Color.primary.opacity(0.035)
+        }
+        return Color.clear
     }
 }
 
@@ -833,97 +968,128 @@ private struct ToolbarConnectionSelector: View {
     @ObservedObject var model: WorkspaceModel
 
     var body: some View {
-        Button {
-            model.openConnectionDialog()
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(model.activeConfig != nil ? Color.green : Color.secondary.opacity(0.45))
-                    .frame(width: 7, height: 7)
-
-                if let profile = model.activeProfile {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 5) {
-                            Text(profile.name)
-                                .font(.system(size: 12, weight: .medium))
-                                .fixedSize(horizontal: true, vertical: false)
-                            Text(hostSummary(for: profile))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: true, vertical: false)
+        Menu {
+            if !model.savedProfiles.isEmpty {
+                ForEach(model.savedProfiles) { profile in
+                    let isActive = model.activeProfile?.id == profile.id && model.activeConfig != nil
+                    Button {
+                        model.quickConnect(profile: profile)
+                    } label: {
+                        if isActive {
+                            Label("\(profile.name) — \(hostSummary(for: profile))", systemImage: "checkmark")
+                        } else {
+                            Text("\(profile.name) — \(hostSummary(for: profile))")
                         }
-
-                        HStack(spacing: 5) {
-                            Text(profile.name)
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            if !hostSummary(for: profile).isEmpty {
-                                Text(hostSummary(for: profile))
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .frame(minWidth: 72)
-                            }
-                        }
-
-                        Text(profile.name)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
                     }
+                    .disabled(model.connectingProfileId != nil || isActive)
+                }
 
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                } else if let selected = model.selectedSavedProfile {
-                    Text(selected.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                Divider()
+            }
 
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Not Connected")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            Button("New Connection…") {
+                model.openConnectionDialog(startNew: true)
+            }
+
+            Button("Manage Connections…") {
+                model.openConnectionDialog(selecting: model.activeProfile ?? model.selectedSavedProfile)
+            }
+
+            if model.activeConfig != nil {
+                Divider()
+                Button("Disconnect") {
+                    model.disconnect()
                 }
             }
-            .padding(.horizontal, 6)
-            .frame(maxWidth: 280)
+        } label: {
+            selectorLabel
         }
-        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .help(tooltipText)
         .accessibilityLabel(accessibilityText)
     }
 
+    @ViewBuilder
+    private var selectorLabel: some View {
+        if let profile = model.activeProfile, model.activeConfig != nil {
+            Group {
+                if model.connectingProfileId != nil {
+                    (
+                        Text("Connecting… ")
+                            .font(.system(size: 12, weight: .medium))
+                        + Text(Image(systemName: "chevron.down"))
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    )
+                } else {
+                    (
+                        Text(Image(systemName: "circle.fill"))
+                            .font(.system(size: 7))
+                            .foregroundColor(.green)
+                        + Text("  \(profile.name)")
+                            .font(.system(size: 12, weight: .medium))
+                        + Text("  \(hostSummary(for: profile))")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        + Text("  ")
+                            .font(.system(size: 7))
+                        + Text(Image(systemName: "chevron.down"))
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    )
+                }
+            }
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(maxWidth: 280)
+        } else {
+            Group {
+                if model.connectingProfileId != nil {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    (
+                        Text(Image(systemName: "cylinder.split.1x2"))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                        + Text(" ")
+                            .font(.system(size: 7))
+                        + Text(Image(systemName: "chevron.down"))
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    )
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .fixedSize()
+        }
+    }
+
     private func hostSummary(for profile: ConnectionProfile) -> String {
-        profile.port == 5432 ? profile.host : "\(profile.host):\(profile.port)"
+        profile.port == 5432 ? profile.host : "\(profile.host):\(String(profile.port))"
     }
 
     private var tooltipText: String {
-        if let profile = model.activeProfile {
-            return "\(profile.name)\n\(profile.user)@\(profile.host):\(profile.port)/\(profile.database) (SSL: \(profile.sslMode))\nClick to switch or manage connections (⌘⇧O)"
+        if let profile = model.activeProfile, model.activeConfig != nil {
+            return "\(profile.name) · \(profile.user)@\(hostSummary(for: profile))/\(profile.database) · SSL: \(profile.sslMode)"
         }
-        if let selected = model.selectedSavedProfile {
-            return "Selected profile: \(selected.name) (\(selected.user)@\(selected.host):\(selected.port)/\(selected.database))\nClick to connect or switch profiles (⌘⇧O)"
-        }
-        return "Saved Connections & Quick Switch (⌘⇧O)"
+        return "Connections (⌘⇧O)"
     }
 
     private var accessibilityText: String {
-        if let profile = model.activeProfile {
+        if let profile = model.activeProfile, model.activeConfig != nil {
             return "Connected to \(profile.name), \(profile.host)"
         }
-        if let selected = model.selectedSavedProfile {
-            return "Selected profile \(selected.name), not connected"
-        }
-        return "Not connected, open connections"
+        return "Connections, not connected"
     }
 }
 
@@ -939,70 +1105,16 @@ private extension WorkspaceView {
                 ToolbarWorkspaceModePicker(selection: $model.currentMode)
             }
 
-            newSqlTabToolbarItem
-        }
-
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                model.isShowingSettingsSheet = true
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-            .labelStyle(.iconOnly)
-            .help("Settings & Draft Privacy (⌘,)")
-            .accessibilityLabel("Settings")
-
-            if model.activeConfig != nil {
+            ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     model.disconnect()
                 } label: {
                     Label("Disconnect", systemImage: "cable.connector.slash")
                 }
                 .labelStyle(.iconOnly)
-                .help("Disconnect from Database")
-                .accessibilityLabel("Disconnect from Database")
-            } else {
-                Button {
-                    model.openConnectionDialog()
-                } label: {
-                    Label("Connect", systemImage: "cable.connector")
-                }
-                .labelStyle(.titleAndIcon)
-                .help("Open Connections (⌘N)")
-                .accessibilityLabel("Connect to Database")
+                .help("Disconnect")
+                .accessibilityLabel("Disconnect")
             }
         }
-    }
-
-    @ToolbarContentBuilder
-    var newSqlTabToolbarItem: some ToolbarContent {
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            ToolbarItem(placement: .automatic) {
-                newSqlTabButton
-            }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .automatic) {
-                newSqlTabButton
-            }
-        }
-        #else
-        ToolbarItem(placement: .automatic) {
-            newSqlTabButton
-        }
-        #endif
-    }
-
-    var newSqlTabButton: some View {
-        Button {
-            model.openNewSqlTab()
-        } label: {
-            Label("New SQL Tab", systemImage: "plus.rectangle.on.rectangle")
-        }
-        .labelStyle(.iconOnly)
-        .keyboardShortcut("t", modifiers: [.command])
-        .help("New SQL Tab (⌘T)")
-        .accessibilityLabel("New SQL Tab")
     }
 }

@@ -32,9 +32,9 @@ public struct PrivacySettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Settings & Draft Privacy")
+                    Text("Settings")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Control how SQL editor tabs and local drafts are stored on this Mac.")
+                    Text("SQL draft storage and privacy")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -70,7 +70,7 @@ public struct PrivacySettingsView: View {
                         )
                         .font(.system(size: 13, weight: .medium))
 
-                        Text("SQL text may contain sensitive tokens, literals, or customer identifiers. When enabled, LucidSQL stores tab names, SQL draft text, and cursor selections in Application Support. Passwords (Keychain) and query results are never written to draft storage. Disabling deletes any saved drafts immediately and keeps open tabs working strictly in memory.")
+                        Text("SQL text may contain sensitive tokens or identifiers. When enabled, tab names, SQL text, and cursor selections are saved in Application Support (never passwords or query results). Disabling deletes saved drafts immediately.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -79,9 +79,9 @@ public struct PrivacySettingsView: View {
 
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Saved SQL Drafts on Disk")
+                                Text("Saved SQL Drafts")
                                     .font(.system(size: 12, weight: .medium))
-                                Text("Removes persisted SQL drafts for all connection profiles without closing active tabs.")
+                                Text("Delete persisted drafts for all profiles while keeping open tabs.")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.secondary)
                             }

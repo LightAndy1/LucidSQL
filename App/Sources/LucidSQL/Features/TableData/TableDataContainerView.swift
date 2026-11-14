@@ -312,8 +312,9 @@ public struct TableDataContainerView: View {
                 Divider()
             }
 
-            // Error Banner if present
-            if let error = viewModel.errorMessage {
+            // Error Banner if present (shown above populated rows or for uncertain commits)
+            if let error = viewModel.errorMessage,
+               !viewModel.rows.isEmpty || !viewModel.stagedInserts.isEmpty || viewModel.hasUncertainCommitOutcome {
                 HStack(spacing: 8) {
                     Image(systemName: viewModel.hasUncertainCommitOutcome ? "exclamationmark.shield.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(viewModel.hasUncertainCommitOutcome ? .orange : .red)
@@ -333,6 +334,12 @@ public struct TableDataContainerView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
                     } else {
+                        Button("Retry") {
+                            viewModel.reloadTable(config: config)
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+
                         Button {
                             viewModel.errorMessage = nil
                         } label: {
@@ -349,7 +356,7 @@ public struct TableDataContainerView: View {
                 Divider()
             }
 
-            // Grid View, Immediate Loading State, or Empty State (keep DataTableView mounted for cell/column reuse)
+            // Grid View, Immediate Loading State, Error State, or Empty State (keep DataTableView mounted for cell/column reuse)
             ZStack {
                 DataTableView(
                     viewModel: viewModel,
@@ -368,6 +375,31 @@ public struct TableDataContainerView: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(NSColor.textBackgroundColor))
+                } else if let error = viewModel.errorMessage,
+                          viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty {
+                    VStack(spacing: 12) {
+                        Spacer(minLength: 4)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.red)
+                        Text("Failed to load \(viewModel.currentSchema).\(viewModel.currentTable)")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(error)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 420)
+                        Button("Retry") {
+                            viewModel.reloadTable(config: config)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        Spacer(minLength: 4)
+                    }
+                    .padding(20)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(NSColor.textBackgroundColor))
                 } else if viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty {

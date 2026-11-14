@@ -838,4 +838,22 @@ struct TableDataViewModelTests {
         #expect(tableView.tableColumns[0].identifier.rawValue == "col_index")
         #expect(tableView.tableColumns[15].identifier.rawValue == "col_14")
     }
+
+    @Test("Verify table loading clears isLoading on failure and cancellation")
+    @MainActor
+    func testTableLoadingClearsIndicatorsOnFailureAndCancellation() async throws {
+        let config = getLocalConfig()
+        let vm = TableDataViewModel()
+
+        // Failure on non-existent table clears isLoading and populates errorMessage
+        await vm.loadTable(config: config, schema: "public", table: "nonexistent_table_\(UUID().uuidString.prefix(8))")
+        #expect(vm.isLoading == false)
+        #expect(vm.errorMessage != nil)
+
+        // Cancellation clears isLoading
+        vm.startTableLoad(config: config, schema: "information_schema", table: "tables")
+        #expect(vm.isLoading == true)
+        vm.cancelActiveLoad()
+        #expect(vm.isLoading == false)
+    }
 }
