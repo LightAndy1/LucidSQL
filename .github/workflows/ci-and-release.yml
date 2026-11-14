@@ -99,11 +99,7 @@ jobs:
           fi
 
           ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${ARCH}"
-          if [[ "${IS_RELEASE}" == "true" ]]; then
-            ARTIFACT_NAME="LucidSQL-${VERSION}-macos-${ARCH}-dmg"
-          else
-            ARTIFACT_NAME="LucidSQL-dev-macos-${ARCH}-dmg"
-          fi
+          ARTIFACT_NAME="${ARCHIVE_NAME}-dmg"
 
           {
             echo "is_release=${IS_RELEASE}"
@@ -189,6 +185,7 @@ jobs:
             --require-liquid-glass \
             --version "${{ steps.mode.outputs.version }}" \
             --build-number "${GITHUB_RUN_NUMBER}" \
+            --commit "${GITHUB_SHA::7}" \
             --archive-name "${{ steps.mode.outputs.archive_name }}" \
             --output-dir "${RUNNER_TEMP}/dist"
 

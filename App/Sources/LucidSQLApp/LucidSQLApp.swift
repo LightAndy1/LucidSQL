@@ -45,7 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About LucidSQL", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = NSMenuItem(title: "About LucidSQL", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
         appMenu.addItem(.separator())
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettingsSheet), keyEquivalent: ",")
         settingsItem.target = self
@@ -78,6 +80,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showAboutPanel() {
+        let info = Bundle.main.infoDictionary
+        let shortVersion = (info?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+        let buildNumber = (info?["CFBundleVersion"] as? String) ?? "dev"
+        let gitCommit = (info?["LucidSQLGitCommit"] as? String) ?? "local"
+        let credits = NSAttributedString(
+            string: "Commit \(gitCommit) • Apple Silicon (arm64)",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: shortVersion,
+            .version: "\(buildNumber) (\(gitCommit))",
+            .credits: credits,
+        ])
     }
 
     @objc private func openSettingsSheet() {

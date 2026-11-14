@@ -70,11 +70,14 @@ fi
 DMG_DIR="$(cd "$(dirname "${DMG_PATH}")" && pwd -P)"
 DMG_BASE="$(basename "${DMG_PATH}")"
 DMG_ABS="${DMG_DIR}/${DMG_BASE}"
+DMG_SHA256="$(shasum -a 256 "${DMG_ABS}" | awk '{print $1}')"
 
 if [[ -f "${DMG_ABS}.sha256" ]]; then
     echo "=== 1. Verifying DMG Checksum ==="
     (cd "${DMG_DIR}" && shasum -a 256 -c "${DMG_BASE}.sha256")
 fi
+echo "DMG path: ${DMG_ABS}"
+echo "DMG SHA-256: ${DMG_SHA256}"
 
 echo "=== 2. Verifying DMG Integrity ==="
 hdiutil verify "${DMG_ABS}"
@@ -90,7 +93,6 @@ mkdir -p "${MOUNT_DIR}" "${RELOCATED_DIR}"
 HIDDEN_CORE_TARGET=""
 HIDDEN_APP_BUILD=""
 APP_PID=""
-OPEN_PID=""
 
 cleanup() {
     set +e
@@ -99,8 +101,8 @@ cleanup() {
         sleep 1
         kill -9 "${APP_PID}" 2>/dev/null || true
     fi
-    if [[ -n "${OPEN_PID}" ]] && kill -0 "${OPEN_PID}" 2>/dev/null; then
-        kill "${OPEN_PID}" 2>/dev/null || true
+    if [[ -n "${APP_PID}" ]]; then
+        wait "${APP_PID}" 2>/dev/null || true
     fi
     if [[ -n "${HIDDEN_CORE_TARGET}" && -d "${HIDDEN_CORE_TARGET}" && ! -e "${ROOT_DIR}/Core/target" ]]; then
         mv "${HIDDEN_CORE_TARGET}" "${ROOT_DIR}/Core/target"
@@ -141,11 +143,27 @@ RELOCATED_APP="${RELOCATED_DIR}/LucidSQL.app"
 ditto "${MOUNT_DIR}/LucidSQL.app" "${RELOCATED_APP}"
 hdiutil detach "${MOUNT_DIR}" -quiet
 
-echo "=== 5. Verifying Relocated Bundle Signature & Mach-O Linkage ==="
+echo "=== 5. Verifying Relocated Bundle Signature, Provenance & Mach-O Linkage ==="
+RELOCATED_EXEC="${RELOCATED_APP}/Contents/MacOS/LucidSQLApp"
+RELOCATED_DYLIB="${RELOCATED_APP}/Contents/Frameworks/liblucidsql_core.dylib"
+PLIST_PATH="${RELOCATED_APP}/Contents/Info.plist"
+
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
+APP_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
+APP_COMMIT="$(/usr/libexec/PlistBuddy -c 'Print :LucidSQLGitCommit' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
+EXEC_UUID="$(dwarfdump --uuid "${RELOCATED_EXEC}" | awk '{print $2; exit}')"
+EXEC_SHA256="$(shasum -a 256 "${RELOCATED_EXEC}" | awk '{print $1}')"
+DYLIB_UUID="$(dwarfdump --uuid "${RELOCATED_DYLIB}" | awk '{print $2; exit}')"
+DYLIB_SHA256="$(shasum -a 256 "${RELOCATED_DYLIB}" | awk '{print $1}')"
+
+echo "Provenance: version=${APP_VERSION} build=${APP_BUILD} commit=${APP_COMMIT}"
+echo "Executable UUID=${EXEC_UUID} SHA-256=${EXEC_SHA256}"
+echo "Dylib UUID=${DYLIB_UUID} SHA-256=${DYLIB_SHA256}"
+
 codesign --verify --deep --strict --verbose=2 "${RELOCATED_APP}"
 verify_bundle_macho "${RELOCATED_APP}"
 if [[ "${REQUIRE_LIQUID_GLASS}" == "true" ]]; then
-    verify_liquid_glass_symbols "${RELOCATED_APP}/Contents/MacOS/LucidSQLApp"
+    verify_liquid_glass_symbols "${RELOCATED_EXEC}"
 fi
 
 if [[ "${SKIP_LAUNCH}" == "true" ]]; then
@@ -165,62 +183,85 @@ if [[ "${ISOLATE_BUILD_DIRS}" == "true" ]]; then
     fi
 fi
 
-echo "=== 7. Launching Relocated LucidSQL.app via LaunchServices (DYLD_* Unset) ==="
+echo "=== 7. Launching Relocated Executable Explicitly (DYLD_* Unset) ==="
 LAUNCH_LOG="${WORK_DIR}/launch.log"
-RELOCATED_EXEC="${RELOCATED_APP}/Contents/MacOS/LucidSQLApp"
 
+# Launch the relocated Mach-O executable directly (not via bundle ID or `open`)
+# so LaunchServices cannot route execution to any older installed/Downloads bundle.
 env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u DYLD_FALLBACK_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES \
-    open -n -W --stdout "${LAUNCH_LOG}" --stderr "${LAUNCH_LOG}" "${RELOCATED_APP}" &
-OPEN_PID=$!
+    "${RELOCATED_EXEC}" >"${LAUNCH_LOG}" 2>&1 &
+APP_PID=$!
 
-# Wait up to 10 seconds for the process to launch and present an on-screen window.
-WINDOW_FOUND="false"
-for _ in $(seq 1 20); do
-    if [[ -z "${APP_PID}" ]]; then
-        APP_PID="$(pgrep -f "${RELOCATED_EXEC}" | head -n 1 || true)"
+PROC_PATH_ACTUAL="$(swift -e "
+import Darwin
+let pid = Int32(${APP_PID})
+var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+let len = proc_pidpath(pid, &buf, UInt32(buf.count))
+if len > 0 {
+    print(String(cString: buf))
+} else {
+    exit(1)
+}
+" 2>/dev/null || true)"
+
+if [[ -n "${PROC_PATH_ACTUAL}" && "${PROC_PATH_ACTUAL}" != "${RELOCATED_EXEC}" ]]; then
+    echo "Error: Launched PID ${APP_PID} resolved to unexpected executable '${PROC_PATH_ACTUAL}' (expected '${RELOCATED_EXEC}')." >&2
+    exit 1
+fi
+
+# Wait up to 12 seconds for the actual main workspace window (>= 900x600) to appear.
+WINDOW_INFO=""
+for _ in $(seq 1 24); do
+    if ! kill -0 "${APP_PID}" 2>/dev/null; then
+        echo "Error: Relocated LucidSQLApp (PID ${APP_PID}) exited prematurely!" >&2
+        cat "${LAUNCH_LOG}" >&2 || true
+        exit 1
     fi
 
-    if [[ -n "${APP_PID}" ]]; then
-        if ! kill -0 "${APP_PID}" 2>/dev/null; then
-            echo "Error: Relocated LucidSQLApp (PID ${APP_PID}) exited prematurely!" >&2
-            cat "${LAUNCH_LOG}" >&2 || true
-            exit 1
-        fi
-
-        if swift -e "
+    WINDOW_INFO="$(swift -e "
 import CoreGraphics
 let pid = Int32(${APP_PID})
 let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-let match = list.first {
-    (\$0[kCGWindowOwnerPID as String] as? Int32) == pid &&
-    (\$0[kCGWindowLayer as String] as? Int) == 0 &&
-    ((\$0[kCGWindowBounds as String] as? [String: Any])?[\"Width\"] as? Double ?? 0) > 0
-}
-if let match {
-    print(\"WINDOW_DETECTED:\", match[kCGWindowBounds as String] ?? \"ok\")
-    exit(0)
+for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
+    let layer = w[kCGWindowLayer as String] as? Int ?? -1
+    let name = w[kCGWindowName as String] as? String
+    let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = bounds[\"Width\"] as? Double ?? 0
+    let height = bounds[\"Height\"] as? Double ?? 0
+    if layer == 0 && width >= 900 && height >= 600 && (name == nil || name == \"LucidSQL\") {
+        print(\"WORKSPACE_WINDOW: name=\\(name ?? \"<hidden>\") width=\\(Int(width)) height=\\(Int(height)) x=\\(Int(bounds[\"X\"] as? Double ?? 0)) y=\\(Int(bounds[\"Y\"] as? Double ?? 0))\")
+        exit(0)
+    }
 }
 exit(1)
-" 2>/dev/null; then
-            WINDOW_FOUND="true"
-            break
-        fi
-    elif ! kill -0 "${OPEN_PID}" 2>/dev/null; then
-        echo "Error: 'open -n -W' exited before LucidSQLApp became active!" >&2
-        cat "${LAUNCH_LOG}" >&2 || true
-        wait "${OPEN_PID}" || true
-        exit 1
+" 2>/dev/null || true)"
+    if [[ -n "${WINDOW_INFO}" ]]; then
+        break
     fi
     sleep 0.5
 done
 
-if [[ -z "${APP_PID}" ]] || ! kill -0 "${APP_PID}" 2>/dev/null; then
-    echo "Error: Relocated LucidSQLApp failed to start or stay alive." >&2
+if ! kill -0 "${APP_PID}" 2>/dev/null; then
+    echo "Error: Relocated LucidSQLApp failed to stay alive (PID ${APP_PID})." >&2
     cat "${LAUNCH_LOG}" >&2 || true
     exit 1
 fi
 
-# Confirm the process remains alive for an additional 2 seconds after launch.
+if [[ -z "${WINDOW_INFO}" ]]; then
+    echo "Error: Main workspace window (layer 0, >= 900x600) did not appear for PID ${APP_PID}. Windows observed:" >&2
+    swift -e "
+import CoreGraphics
+let pid = Int32(${APP_PID})
+let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
+    print(\"  window:\", \"layer=\", w[kCGWindowLayer as String] ?? -1, \"name=\", w[kCGWindowName as String] ?? \"nil\", \"bounds=\", w[kCGWindowBounds as String] ?? [:])
+}
+" >&2 || true
+    cat "${LAUNCH_LOG}" >&2 || true
+    exit 1
+fi
+
+# Confirm the process remains alive for an additional 2 seconds after workspace appearance.
 sleep 2
 if ! kill -0 "${APP_PID}" 2>/dev/null; then
     echo "Error: Relocated LucidSQLApp (PID ${APP_PID}) crashed shortly after startup!" >&2
@@ -228,15 +269,39 @@ if ! kill -0 "${APP_PID}" 2>/dev/null; then
     exit 1
 fi
 
-echo "Process stayed alive (PID ${APP_PID}). Checking loaded dylib path:"
-if command -v lsof >/dev/null 2>&1; then
-    lsof -p "${APP_PID}" 2>/dev/null | grep "liblucidsql_core.dylib" || true
-fi
-
-if [[ "${WINDOW_FOUND}" != "true" ]]; then
-    echo "Error: Relocated LucidSQLApp stayed alive (PID ${APP_PID}) but no layer-0 on-screen window was detected." >&2
-    cat "${LAUNCH_LOG}" >&2 || true
+PROC_PATH_ACTUAL="$(swift -e "
+import Darwin
+let pid = Int32(${APP_PID})
+var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+let len = proc_pidpath(pid, &buf, UInt32(buf.count))
+if len > 0 {
+    print(String(cString: buf))
+} else {
+    exit(1)
+}
+")"
+if [[ "${PROC_PATH_ACTUAL}" != "${RELOCATED_EXEC}" ]]; then
+    echo "Error: Running PID ${APP_PID} executable '${PROC_PATH_ACTUAL}' does not match '${RELOCATED_EXEC}'." >&2
     exit 1
 fi
 
-echo "=== DMG Verification Passed! Relocated app stayed alive with an active window. ==="
+LOADED_DYLIB_PATHS="$(lsof -Fn -p "${APP_PID}" 2>/dev/null | sed -n 's/^n//p' | grep 'liblucidsql_core\.dylib$' | sort -u || true)"
+if [[ "${LOADED_DYLIB_PATHS}" != "${RELOCATED_DYLIB}" ]]; then
+    echo "Error: Loaded liblucidsql_core.dylib mismatch for PID ${APP_PID}!" >&2
+    echo "  Expected: ${RELOCATED_DYLIB}" >&2
+    echo "  Actual:   ${LOADED_DYLIB_PATHS:-<none>}" >&2
+    exit 1
+fi
+
+echo "=== Verification Provenance Summary ==="
+echo "Commit:               ${APP_COMMIT}"
+echo "Version / Build:      ${APP_VERSION} (${APP_BUILD})"
+echo "DMG SHA-256:          ${DMG_SHA256}"
+echo "Executable UUID:      ${EXEC_UUID}"
+echo "Executable SHA-256:   ${EXEC_SHA256}"
+echo "Dylib UUID:           ${DYLIB_UUID}"
+echo "Dylib SHA-256:        ${DYLIB_SHA256}"
+echo "Launched Executable:  ${PROC_PATH_ACTUAL} (PID ${APP_PID})"
+echo "Loaded Rust Dylib:    ${LOADED_DYLIB_PATHS}"
+echo "${WINDOW_INFO}"
+echo "=== DMG Verification Passed! Relocated app stayed alive with main workspace window. ==="

@@ -9,7 +9,9 @@ APP_DIR="${ROOT_DIR}/App"
 source "${SCRIPT_DIR}/lib/bundle-verify.sh"
 
 VERSION="0.1.0"
-BUILD_NUMBER="1"
+VERSION_EXPLICIT="false"
+BUILD_NUMBER=""
+GIT_COMMIT=""
 CONFIGURATION="debug"
 SIGNING_MODE="adhoc"
 CREATE_DMG="false"
@@ -24,7 +26,8 @@ Usage: scripts/package-app.sh [options]
 
 Options:
   --version <ver>            Marketing version (e.g. 0.1.0 or v0.1.0). Default: 0.1.0
-  --build-number <num>       Bundle build number (CFBundleVersion). Default: 1
+  --build-number <num>       Bundle build number (CFBundleVersion). Default: git commit count or 1
+  --commit <sha>             Short commit SHA embedded in Info.plist. Default: git rev-parse --short=7 HEAD
   --configuration <cfg>      Swift build configuration: debug | release. Default: debug
   --signing-mode <mode>      Signing mode: adhoc (intended distribution mode). Default: adhoc
   --dmg                      Create distributable .dmg (with Applications shortcut) and .dmg.sha256
@@ -40,10 +43,15 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --version)
             VERSION="${2:-}"
+            VERSION_EXPLICIT="true"
             shift 2
             ;;
         --build-number)
             BUILD_NUMBER="${2:-}"
+            shift 2
+            ;;
+        --commit)
+            GIT_COMMIT="${2:-}"
             shift 2
             ;;
         --configuration)
@@ -122,8 +130,28 @@ if [[ "${REQUIRE_LIQUID_GLASS}" == "true" ]]; then
     fi
 fi
 
+if [[ -z "${GIT_COMMIT}" ]]; then
+    if command -v git >/dev/null 2>&1 && git -C "${ROOT_DIR}" rev-parse --short=7 HEAD >/dev/null 2>&1; then
+        GIT_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short=7 HEAD)"
+    else
+        GIT_COMMIT="unknown"
+    fi
+fi
+
+if [[ -z "${BUILD_NUMBER}" ]]; then
+    if command -v git >/dev/null 2>&1 && git -C "${ROOT_DIR}" rev-list --count HEAD >/dev/null 2>&1; then
+        BUILD_NUMBER="$(git -C "${ROOT_DIR}" rev-list --count HEAD)"
+    else
+        BUILD_NUMBER="1"
+    fi
+fi
+
 if [[ -z "${ARCHIVE_NAME}" ]]; then
-    ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${HOST_ARCH}"
+    if [[ "${VERSION_EXPLICIT}" == "true" ]]; then
+        ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${HOST_ARCH}"
+    else
+        ARCHIVE_NAME="LucidSQL-${BUNDLE_SHORT_VERSION}-dev.${GIT_COMMIT}-macos-${HOST_ARCH}"
+    fi
 fi
 
 mkdir -p "${OUTPUT_DIR}"
@@ -212,6 +240,8 @@ cat <<EOF > "${BUNDLE_DIR}/Contents/Info.plist"
     <string>${BUNDLE_SHORT_VERSION}</string>
     <key>CFBundleVersion</key>
     <string>${BUILD_NUMBER}</string>
+    <key>LucidSQLGitCommit</key>
+    <string>${GIT_COMMIT}</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
@@ -247,8 +277,13 @@ echo "Signed ad-hoc (not notarized; intended distribution mode)."
 
 echo "=== Application Bundle Ready ==="
 echo "Bundle path: ${BUNDLE_DIR}"
+echo "Version / Build / Commit: ${BUNDLE_SHORT_VERSION} (${BUILD_NUMBER}) @ ${GIT_COMMIT}"
 echo "Binary architectures (LucidSQLApp): $(lipo -archs "${BUNDLE_EXEC}")"
 echo "Bridge architectures (liblucidsql_core.dylib): $(lipo -archs "${BUNDLE_DYLIB}")"
+echo "Executable UUID: $(dwarfdump --uuid "${BUNDLE_EXEC}" | head -n 1)"
+echo "Executable SHA-256: $(shasum -a 256 "${BUNDLE_EXEC}" | awk '{print $1}')"
+echo "Dylib UUID: $(dwarfdump --uuid "${BUNDLE_DYLIB}" | head -n 1)"
+echo "Dylib SHA-256: $(shasum -a 256 "${BUNDLE_DYLIB}" | awk '{print $1}')"
 
 if [[ "${CREATE_DMG}" == "true" ]]; then
     echo "=== 7. Creating Versioned arm64 DMG & SHA-256 Checksum ==="
