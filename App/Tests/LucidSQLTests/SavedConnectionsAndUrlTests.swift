@@ -370,6 +370,16 @@ struct SavedConnectionsAndUrlTests {
             return "PostgreSQL 16.0"
         }
 
+        @MainActor
+        func waitUntilIdle() async throws {
+            for _ in 0..<250 {
+                if model.connectingProfileId == nil {
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
         // Rapid double click on A must only trigger one connection attempt
         model.quickConnect(profile: profileA)
         #expect(model.connectingProfileId == profileA.id)
@@ -377,7 +387,7 @@ struct SavedConnectionsAndUrlTests {
         model.quickConnect(profile: profileB)
         #expect(model.connectingProfileId == profileA.id)
 
-        try await Task.sleep(for: .milliseconds(160))
+        try await waitUntilIdle()
         #expect(probe.callsCount == 1)
         #expect(model.connectingProfileId == nil)
         #expect(model.activeProfile?.id == profileA.id)
@@ -398,7 +408,7 @@ struct SavedConnectionsAndUrlTests {
         probe.setShouldFail(true)
         model.quickConnect(profile: profileB)
         #expect(model.connectingProfileId == profileB.id)
-        try await Task.sleep(for: .milliseconds(160))
+        try await waitUntilIdle()
         #expect(model.connectingProfileId == nil)
         #expect(model.activeProfile?.id == profileA.id)
         #expect(model.quickConnectErrorProfileId == profileB.id)
