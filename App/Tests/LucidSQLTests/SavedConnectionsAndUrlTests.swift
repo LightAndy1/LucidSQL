@@ -606,4 +606,39 @@ struct SavedConnectionsAndUrlTests {
         #expect(workspace.currentMode == .tableData)
         #expect(workspace.sqlWorkspace.tabs.first?.sqlText == "SELECT 'background-draft';")
     }
+
+    @Test("Connection selector display omits duplicate host/IP when already in profile name")
+    func testConnectionDisplayFormattingDeduplicatesEndpoint() {
+        let distinctName = ConnectionProfile(
+            name: "Local Playground",
+            host: "127.0.0.1",
+            port: 5432,
+            database: "postgres",
+            user: "postgres"
+        )
+        #expect(ConnectionDisplayFormatting.hostSummary(for: distinctName) == "127.0.0.1")
+        #expect(ConnectionDisplayFormatting.shouldAppendEndpoint(for: distinctName) == true)
+        #expect(ConnectionDisplayFormatting.menuLabel(for: distinctName) == "Local Playground — 127.0.0.1")
+
+        let hostAsName = ConnectionProfile(
+            name: "127.0.0.1",
+            host: "127.0.0.1",
+            port: 5432,
+            database: "postgres",
+            user: "postgres"
+        )
+        #expect(ConnectionDisplayFormatting.shouldAppendEndpoint(for: hostAsName) == false)
+        #expect(ConnectionDisplayFormatting.menuLabel(for: hostAsName) == "127.0.0.1")
+
+        let embeddedHostWithPort = ConnectionProfile(
+            name: "Staging (db.internal:5433)",
+            host: "db.internal",
+            port: 5433,
+            database: "app",
+            user: "app"
+        )
+        #expect(ConnectionDisplayFormatting.hostSummary(for: embeddedHostWithPort) == "db.internal:5433")
+        #expect(ConnectionDisplayFormatting.shouldAppendEndpoint(for: embeddedHostWithPort) == false)
+        #expect(ConnectionDisplayFormatting.menuLabel(for: embeddedHostWithPort) == "Staging (db.internal:5433)")
+    }
 }

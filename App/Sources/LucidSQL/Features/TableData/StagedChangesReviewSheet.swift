@@ -239,19 +239,32 @@ public struct StagedChangesReviewSheet: View {
                 .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
 
-            // Safety & ordering notice
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 1)
-                Text("Atomic Transaction (Order: 1. Deletes → 2. Updates → 3. Inserts): Updates and deletes verify row `xmin` to prevent lost overwrites. Any conflict or constraint error aborts and rolls back the whole batch while keeping your staged work intact. Cross-row FK references to unsaved server-generated keys must be applied in separate batches.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            // Concise commit notice + optional technical details
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "shield.lefthalf.filled")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 1)
+                    Text("All changes are applied together. If any change fails, nothing is saved.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+
+                DisclosureGroup("Details") {
+                    Text("Order: 1. Deletes → 2. Updates → 3. Inserts. Updates and deletes verify row `xmin` to prevent lost overwrites. Any conflict or constraint error rolls back the batch while keeping your staged edits. Cross-row foreign key references to unsaved server-generated keys must be applied in separate batches.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
             }
-            .padding(8)
-            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            .padding(10)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
 
             if viewModel.hasUncertainCommitOutcome {
                 HStack(alignment: .top, spacing: 8) {

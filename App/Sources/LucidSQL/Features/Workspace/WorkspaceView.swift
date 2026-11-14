@@ -1023,6 +1023,28 @@ private struct ToolbarWorkspaceModePicker: View {
     }
 }
 
+public enum ConnectionDisplayFormatting {
+    public static func hostSummary(for profile: ConnectionProfile) -> String {
+        profile.port == 5432 ? profile.host : "\(profile.host):\(String(profile.port))"
+    }
+
+    public static func shouldAppendEndpoint(for profile: ConnectionProfile) -> Bool {
+        let name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let host = profile.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !host.isEmpty else { return false }
+        let summary = hostSummary(for: profile).lowercased()
+        let hostWithPort = "\(host):\(profile.port)"
+        return !name.contains(summary) && !name.contains(hostWithPort) && !name.contains(host)
+    }
+
+    public static func menuLabel(for profile: ConnectionProfile) -> String {
+        if shouldAppendEndpoint(for: profile) {
+            return "\(profile.name) — \(hostSummary(for: profile))"
+        }
+        return profile.name
+    }
+}
+
 private struct ToolbarConnectionSelector: View {
     @ObservedObject var model: WorkspaceModel
 
@@ -1031,13 +1053,14 @@ private struct ToolbarConnectionSelector: View {
             if !model.savedProfiles.isEmpty {
                 ForEach(model.savedProfiles) { profile in
                     let isActive = model.activeProfile?.id == profile.id && model.activeConfig != nil
+                    let itemTitle = ConnectionDisplayFormatting.menuLabel(for: profile)
                     Button {
                         model.quickConnect(profile: profile)
                     } label: {
                         if isActive {
-                            Label("\(profile.name) — \(hostSummary(for: profile))", systemImage: "checkmark")
+                            Label(itemTitle, systemImage: "checkmark")
                         } else {
-                            Text("\(profile.name) — \(hostSummary(for: profile))")
+                            Text(itemTitle)
                         }
                     }
                     .disabled(model.connectingProfileId != nil || isActive)
@@ -1063,7 +1086,7 @@ private struct ToolbarConnectionSelector: View {
         } label: {
             selectorLabel
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
         .menuIndicator(.hidden)
         .help(tooltipText)
         .accessibilityLabel(accessibilityText)
@@ -1075,72 +1098,90 @@ private struct ToolbarConnectionSelector: View {
             Group {
                 if model.connectingProfileId != nil {
                     (
-                        Text("Connecting… ")
+                        Text("Connecting…  ")
                             .font(.system(size: 12, weight: .medium))
                         + Text(Image(systemName: "chevron.down"))
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
                     )
                 } else {
-                    let displayName = profile.name.count > 22 ? String(profile.name.prefix(21)) + "…" : profile.name
+                    let showEndpoint = ConnectionDisplayFormatting.shouldAppendEndpoint(for: profile)
+                    let displayName = profile.name.count > 26 ? String(profile.name.prefix(25)) + "…" : profile.name
                     let host = hostSummary(for: profile)
-                    let displayHost = host.count > 24 ? String(host.prefix(23)) + "…" : host
-                    (
-                        Text(Image(systemName: "circle.fill"))
-                            .font(.system(size: 7))
-                            .foregroundColor(.green)
-                        + Text("  \(displayName)")
-                            .font(.system(size: 12.5, weight: .medium))
-                        + Text("  \(displayHost)")
-                            .font(.system(size: 11.5))
-                            .foregroundColor(.secondary)
-                        + Text("  ")
-                            .font(.system(size: 7))
-                        + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    )
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    let displayHost = host.count > 26 ? String(host.prefix(25)) + "…" : host
+                    if showEndpoint {
+                        (
+                            Text(Image(systemName: "circle.fill"))
+                                .font(.system(size: 7))
+                                .foregroundColor(.green)
+                            + Text("  \(displayName)")
+                                .font(.system(size: 12.5, weight: .medium))
+                            + Text("  \(displayHost)")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                            + Text("  ")
+                                .font(.system(size: 8))
+                            + Text(Image(systemName: "chevron.down"))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    } else {
+                        (
+                            Text(Image(systemName: "circle.fill"))
+                                .font(.system(size: 7))
+                                .foregroundColor(.green)
+                            + Text("  \(displayName)")
+                                .font(.system(size: 12.5, weight: .medium))
+                            + Text("  ")
+                                .font(.system(size: 8))
+                            + Text(Image(systemName: "chevron.down"))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    }
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 18)
             .padding(.vertical, 5)
-            .frame(minHeight: 24)
-            .frame(maxWidth: 300)
+            .frame(minHeight: 26)
+            .frame(maxWidth: 360)
             .fixedSize(horizontal: true, vertical: false)
         } else {
             Group {
                 if model.connectingProfileId != nil {
-                    HStack(spacing: 5) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text(Image(systemName: "chevron.down"))
+                    (
+                        Text("Connecting…  ")
+                            .font(.system(size: 12, weight: .medium))
+                        + Text(Image(systemName: "chevron.down"))
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
-                    }
+                    )
                 } else {
                     (
                         Text(Image(systemName: "cylinder.split.1x2"))
                             .font(.system(size: 12.5, weight: .medium))
                             .foregroundColor(.secondary)
                         + Text("  ")
-                            .font(.system(size: 7))
+                            .font(.system(size: 8))
                         + Text(Image(systemName: "chevron.down"))
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.secondary)
                     )
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 16)
             .padding(.vertical, 5)
-            .frame(minWidth: 46, minHeight: 24)
+            .frame(minWidth: 52, minHeight: 26)
             .fixedSize()
         }
     }
 
     private func hostSummary(for profile: ConnectionProfile) -> String {
-        profile.port == 5432 ? profile.host : "\(profile.host):\(String(profile.port))"
+        ConnectionDisplayFormatting.hostSummary(for: profile)
     }
 
     private var tooltipText: String {
