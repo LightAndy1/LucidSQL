@@ -291,22 +291,22 @@ verify_liquid_glass_symbols() {
     local undef_syms
     undef_syms="$(nm -u "${exec_path}")"
 
-    if ! printf '%s\n' "${undef_syms}" | grep -q '_OBJC_CLASS_\$_NSGlassEffectView'; then
+    if [[ "${undef_syms}" != *'_OBJC_CLASS_$_NSGlassEffectView'* ]]; then
         echo "Error: Liquid Glass _OBJC_CLASS_\$_NSGlassEffectView symbol missing from ${exec_path}. Built with an older SDK/compiler?" >&2
         return 1
     fi
 
-    if ! printf '%s\n' "${undef_syms}" | grep -q 'GlassButtonStyle'; then
+    if [[ "${undef_syms}" != *'GlassButtonStyle'* ]]; then
         echo "Error: Liquid Glass SwiftUI GlassButtonStyle symbol missing from ${exec_path}." >&2
         return 1
     fi
 
-    if ! printf '%s\n' "${undef_syms}" | grep -q 'GlassProminentButtonStyle'; then
+    if [[ "${undef_syms}" != *'GlassProminentButtonStyle'* ]]; then
         echo "Error: Liquid Glass SwiftUI GlassProminentButtonStyle symbol missing from ${exec_path}." >&2
         return 1
     fi
 
-    if ! printf '%s\n' "${undef_syms}" | grep -q 'glassEffect'; then
+    if [[ "${undef_syms}" != *'glassEffect'* ]]; then
         echo "Error: Liquid Glass SwiftUI glassEffect symbol missing from ${exec_path}." >&2
         return 1
     fi

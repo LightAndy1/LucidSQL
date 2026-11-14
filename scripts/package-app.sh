@@ -189,7 +189,7 @@ while IFS= read -r macho; do
     done < <(extract_macho_rpaths "${macho}")
 done < <(find "${BUNDLE_DIR}" -type f | while IFS= read -r f; do file -b "${f}" | grep -q "Mach-O" && echo "${f}"; done)
 
-if ! extract_macho_rpaths "${BUNDLE_EXEC}" | grep -qx "@executable_path/../Frameworks"; then
+if [[ $'\n'"$(extract_macho_rpaths "${BUNDLE_EXEC}")"$'\n' != *$'\n@executable_path/../Frameworks\n'* ]]; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "${BUNDLE_EXEC}"
 fi
 
