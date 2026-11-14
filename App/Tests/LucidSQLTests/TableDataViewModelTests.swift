@@ -793,20 +793,29 @@ struct TableDataViewModelTests {
         let coord = DataTableView(viewModel: vm).makeCoordinator()
 
         func makeCols(_ count: Int, prefix: String) -> [ColumnMetadata] {
-            (0..<count).map { idx in
-                ColumnMetadata(
-                    name: "\(prefix)_\(idx)",
-                    ordinalPosition: UInt32(idx + 1),
-                    pgTypeName: "text",
-                    pgTypeOid: 25,
-                    isPrimaryKey: idx == 0,
-                    isNullable: idx != 0,
-                    defaultValue: nil,
-                    isGenerated: false,
-                    isIdentity: false,
-                    isIdentityAlways: false
+            var columns: [ColumnMetadata] = []
+            columns.reserveCapacity(count)
+            for idx in 0..<count {
+                let name = "\(prefix)_\(idx)"
+                let ordinal = UInt32(idx + 1)
+                let isPrimary = (idx == 0)
+                let isNullable = (idx != 0)
+                columns.append(
+                    ColumnMetadata(
+                        name: name,
+                        ordinalPosition: ordinal,
+                        pgTypeName: "text",
+                        pgTypeOid: 25,
+                        isPrimaryKey: isPrimary,
+                        isNullable: isNullable,
+                        defaultValue: nil,
+                        isGenerated: false,
+                        isIdentity: false,
+                        isIdentityAlways: false
+                    )
                 )
             }
+            return columns
         }
 
         let changed1 = coord.syncColumns(tableView: tableView, columns: makeCols(10, prefix: "a"))
