@@ -1023,6 +1023,12 @@ private struct ToolbarWorkspaceModePicker: View {
     }
 }
 
+public enum ConnectionSelectorState: Equatable, Sendable {
+    case disconnected
+    case connecting
+    case connected(name: String, endpoint: String?)
+}
+
 public enum ConnectionDisplayFormatting {
     public static func hostSummary(for profile: ConnectionProfile) -> String {
         profile.port == 5432 ? profile.host : "\(profile.host):\(String(profile.port))"
@@ -1043,141 +1049,114 @@ public enum ConnectionDisplayFormatting {
         }
         return profile.name
     }
+
+    public static func selectorState(
+        activeProfile: ConnectionProfile?,
+        isConnected: Bool,
+        isConnecting: Bool
+    ) -> ConnectionSelectorState {
+        if isConnecting {
+            return .connecting
+        }
+        guard isConnected, let profile = activeProfile else {
+            return .disconnected
+        }
+        let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = hostSummary(for: profile)
+        if trimmedName.isEmpty {
+            return .connected(name: host.isEmpty ? "Connected" : host, endpoint: nil)
+        }
+        let endpoint = shouldAppendEndpoint(for: profile) ? host : nil
+        return .connected(name: trimmedName, endpoint: endpoint)
+    }
+
+    public static func truncateToFit(
+        _ value: String,
+        maxWidth: CGFloat,
+        middle: Bool = false,
+        measure: (String) -> CGFloat
+    ) -> String {
+        if measure(value) <= maxWidth {
+            return value
+        }
+        let chars = Array(value)
+        guard !chars.isEmpty else { return value }
+        var low = 0
+        var high = chars.count
+        var best = "…"
+        while low <= high {
+            let count = (low + high) / 2
+            let candidate: String
+            if count == 0 {
+                candidate = "…"
+            } else if middle {
+                let prefixCount = (count + 1) / 2
+                let suffixCount = count / 2
+                candidate = String(chars.prefix(prefixCount)) + "…" + String(chars.suffix(suffixCount))
+            } else {
+                candidate = String(chars.prefix(count)) + "…"
+            }
+            if measure(candidate) <= maxWidth {
+                best = candidate
+                low = count + 1
+            } else {
+                high = count - 1
+            }
+        }
+        return best
+    }
+
+    public static func fitConnectedStrings(
+        name: String,
+        endpoint: String?,
+        availableTextWidth: CGFloat,
+        gapWidth: CGFloat,
+        measureName: (String) -> CGFloat,
+        measureEndpoint: (String) -> CGFloat
+    ) -> (name: String, endpoint: String?) {
+        let clampedAvailable = max(60, availableTextWidth)
+        guard let endpoint, !endpoint.isEmpty else {
+            return (
+                truncateToFit(name, maxWidth: clampedAvailable, middle: false, measure: measureName),
+                nil
+            )
+        }
+        let fullNameWidth = measureName(name)
+        let fullEndpointWidth = measureEndpoint(endpoint)
+        if fullNameWidth + gapWidth + fullEndpointWidth <= clampedAvailable {
+            return (name, endpoint)
+        }
+
+        // Preserve both profile name and host/IP when truncating long names.
+        let endpointBudget = min(fullEndpointWidth, max(72, clampedAvailable * 0.40))
+        let nameBudget = max(48, clampedAvailable - gapWidth - endpointBudget)
+        let fittedName = truncateToFit(name, maxWidth: nameBudget, middle: false, measure: measureName)
+        let fittedEndpoint = truncateToFit(endpoint, maxWidth: endpointBudget, middle: true, measure: measureEndpoint)
+        return (fittedName, fittedEndpoint)
+    }
 }
 
 private struct ToolbarConnectionSelector: View {
     @ObservedObject var model: WorkspaceModel
+    @Environment(\.colorScheme) private var colorScheme
 
-    var body: some View {
-        Menu {
-            if !model.savedProfiles.isEmpty {
-                ForEach(model.savedProfiles) { profile in
-                    let isActive = model.activeProfile?.id == profile.id && model.activeConfig != nil
-                    let itemTitle = ConnectionDisplayFormatting.menuLabel(for: profile)
-                    Button {
-                        model.quickConnect(profile: profile)
-                    } label: {
-                        if isActive {
-                            Label(itemTitle, systemImage: "checkmark")
-                        } else {
-                            Text(itemTitle)
-                        }
-                    }
-                    .disabled(model.connectingProfileId != nil || isActive)
-                }
-
-                Divider()
-            }
-
-            Button("New Connection…") {
-                model.openConnectionDialog(startNew: true)
-            }
-
-            Button("Manage Connections…") {
-                model.openConnectionDialog(selecting: model.activeProfile ?? model.selectedSavedProfile)
-            }
-
-            if model.activeConfig != nil {
-                Divider()
-                Button("Disconnect") {
-                    model.disconnect()
-                }
-            }
-        } label: {
-            selectorLabel
-        }
-        .menuStyle(.button)
-        .menuIndicator(.hidden)
-        .help(tooltipText)
-        .accessibilityLabel(accessibilityText)
+    private var selectorState: ConnectionSelectorState {
+        ConnectionDisplayFormatting.selectorState(
+            activeProfile: model.activeProfile,
+            isConnected: model.activeConfig != nil,
+            isConnecting: model.connectingProfileId != nil
+        )
     }
 
-    @ViewBuilder
-    private var selectorLabel: some View {
-        if let profile = model.activeProfile, model.activeConfig != nil {
-            Group {
-                if model.connectingProfileId != nil {
-                    (
-                        Text("Connecting…  ")
-                            .font(.system(size: 12, weight: .medium))
-                        + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    )
-                } else {
-                    let showEndpoint = ConnectionDisplayFormatting.shouldAppendEndpoint(for: profile)
-                    let displayName = profile.name.count > 26 ? String(profile.name.prefix(25)) + "…" : profile.name
-                    let host = hostSummary(for: profile)
-                    let displayHost = host.count > 26 ? String(host.prefix(25)) + "…" : host
-                    if showEndpoint {
-                        (
-                            Text(Image(systemName: "circle.fill"))
-                                .font(.system(size: 7))
-                                .foregroundColor(.green)
-                            + Text("  \(displayName)")
-                                .font(.system(size: 12.5, weight: .medium))
-                            + Text("  \(displayHost)")
-                                .font(.system(size: 11.5))
-                                .foregroundColor(.secondary)
-                            + Text("  ")
-                                .font(.system(size: 8))
-                            + Text(Image(systemName: "chevron.down"))
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundColor(.secondary)
-                        )
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    } else {
-                        (
-                            Text(Image(systemName: "circle.fill"))
-                                .font(.system(size: 7))
-                                .foregroundColor(.green)
-                            + Text("  \(displayName)")
-                                .font(.system(size: 12.5, weight: .medium))
-                            + Text("  ")
-                                .font(.system(size: 8))
-                            + Text(Image(systemName: "chevron.down"))
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundColor(.secondary)
-                        )
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 5)
-            .frame(minHeight: 26)
-            .frame(maxWidth: 360)
-            .fixedSize(horizontal: true, vertical: false)
-        } else {
-            Group {
-                if model.connectingProfileId != nil {
-                    (
-                        Text("Connecting…  ")
-                            .font(.system(size: 12, weight: .medium))
-                        + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    )
-                } else {
-                    (
-                        Text(Image(systemName: "cylinder.split.1x2"))
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundColor(.secondary)
-                        + Text("  ")
-                            .font(.system(size: 8))
-                        + Text(Image(systemName: "chevron.down"))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    )
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 5)
-            .frame(minWidth: 52, minHeight: 26)
-            .fixedSize()
-        }
+    var body: some View {
+        ToolbarConnectionDropdownBridge(
+            model: model,
+            selectorState: selectorState,
+            tooltip: tooltipText,
+            accessibilityLabelText: accessibilityText,
+            colorScheme: colorScheme
+        )
+        .help(tooltipText)
     }
 
     private func hostSummary(for profile: ConnectionProfile) -> String {
@@ -1185,6 +1164,13 @@ private struct ToolbarConnectionSelector: View {
     }
 
     private var tooltipText: String {
+        if model.connectingProfileId != nil {
+            if let connectingId = model.connectingProfileId,
+               let connectingProfile = model.savedProfiles.first(where: { $0.id == connectingId }) {
+                return "Connecting to \(connectingProfile.name) (\(hostSummary(for: connectingProfile)))…"
+            }
+            return "Connecting to PostgreSQL…"
+        }
         if let profile = model.activeProfile, model.activeConfig != nil {
             return "\(profile.name) · \(profile.user)@\(hostSummary(for: profile))/\(profile.database) · SSL: \(profile.sslMode)"
         }
@@ -1192,10 +1178,347 @@ private struct ToolbarConnectionSelector: View {
     }
 
     private var accessibilityText: String {
+        if model.connectingProfileId != nil {
+            return "Connecting to database"
+        }
         if let profile = model.activeProfile, model.activeConfig != nil {
-            return "Connected to \(profile.name), \(profile.host)"
+            return "Connected to \(profile.name), \(hostSummary(for: profile))"
         }
         return "Connections, not connected"
+    }
+}
+
+private struct ToolbarConnectionDropdownBridge: NSViewRepresentable {
+    let model: WorkspaceModel
+    let selectorState: ConnectionSelectorState
+    let tooltip: String
+    let accessibilityLabelText: String
+    let colorScheme: ColorScheme
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model)
+    }
+
+    func makeNSView(context: Context) -> ToolbarConnectionDropdownButton {
+        let button = ToolbarConnectionDropdownButton()
+        button.menuProvider = { [weak coordinator = context.coordinator] in
+            coordinator?.buildMenu() ?? NSMenu()
+        }
+        apply(to: button, coordinator: context.coordinator)
+        return button
+    }
+
+    func updateNSView(_ nsView: ToolbarConnectionDropdownButton, context: Context) {
+        apply(to: nsView, coordinator: context.coordinator)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: ToolbarConnectionDropdownButton,
+        context: Context
+    ) -> CGSize? {
+        let intrinsic = nsView.intrinsicContentSize
+        if let proposedWidth = proposal.width, proposedWidth.isFinite {
+            let clamped = max(nsView.minimumDisplayWidth, min(intrinsic.width, proposedWidth))
+            return CGSize(width: clamped, height: intrinsic.height)
+        }
+        return intrinsic
+    }
+
+    private func apply(to button: ToolbarConnectionDropdownButton, coordinator: Coordinator) {
+        coordinator.model = model
+        button.selectorState = selectorState
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(accessibilityLabelText)
+        button.refreshTitle(forceInvalidateSize: true)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var model: WorkspaceModel
+
+        init(model: WorkspaceModel) {
+            self.model = model
+        }
+
+        func buildMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            if !model.savedProfiles.isEmpty {
+                for profile in model.savedProfiles {
+                    let isActive = model.activeProfile?.id == profile.id && model.activeConfig != nil
+                    let itemTitle = ConnectionDisplayFormatting.menuLabel(for: profile)
+                    let item = NSMenuItem(
+                        title: itemTitle,
+                        action: #selector(selectProfile(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = profile.id
+                    item.state = isActive ? .on : .off
+                    item.isEnabled = (model.connectingProfileId == nil && !isActive)
+                    menu.addItem(item)
+                }
+                menu.addItem(.separator())
+            }
+
+            let newItem = NSMenuItem(
+                title: "New Connection…",
+                action: #selector(openNewConnection(_:)),
+                keyEquivalent: ""
+            )
+            newItem.target = self
+            newItem.isEnabled = true
+            menu.addItem(newItem)
+
+            let manageItem = NSMenuItem(
+                title: "Manage Connections…",
+                action: #selector(openManageConnections(_:)),
+                keyEquivalent: ""
+            )
+            manageItem.target = self
+            manageItem.isEnabled = true
+            menu.addItem(manageItem)
+
+            if model.activeConfig != nil {
+                menu.addItem(.separator())
+                let disconnectItem = NSMenuItem(
+                    title: "Disconnect",
+                    action: #selector(disconnectActive(_:)),
+                    keyEquivalent: ""
+                )
+                disconnectItem.target = self
+                disconnectItem.isEnabled = true
+                menu.addItem(disconnectItem)
+            }
+
+            return menu
+        }
+
+        @objc func selectProfile(_ sender: NSMenuItem) {
+            guard let profileId = sender.representedObject as? UUID,
+                  let profile = model.savedProfiles.first(where: { $0.id == profileId }) else {
+                return
+            }
+            model.quickConnect(profile: profile)
+        }
+
+        @objc func openNewConnection(_ sender: NSMenuItem) {
+            model.openConnectionDialog(startNew: true)
+        }
+
+        @objc func openManageConnections(_ sender: NSMenuItem) {
+            model.openConnectionDialog(selecting: model.activeProfile ?? model.selectedSavedProfile)
+        }
+
+        @objc func disconnectActive(_ sender: NSMenuItem) {
+            model.disconnect()
+        }
+    }
+}
+
+/// Native toolbar dropdown button backed by `NSButton` + `NSMenu` so macOS 26+ Liquid Glass
+/// and earlier macOS toolbars render one capsule surface, one hit target, and full label fidelity.
+private final class ToolbarConnectionDropdownButton: NSButton {
+    var selectorState: ConnectionSelectorState = .disconnected
+    var menuProvider: (() -> NSMenu)?
+
+    private let maxButtonWidth: CGFloat = 360
+    private let minConnectedWidth: CGFloat = 96
+    private let minDisconnectedWidth: CGFloat = 58
+    private let minimumBezelOverhead: CGFloat = 16
+    private var fullTitleWidth: CGFloat = 0
+    private var desiredWidth: CGFloat = 58
+    private var lastRenderedWidthBudget: CGFloat? = nil
+
+    var minimumDisplayWidth: CGFloat {
+        (selectorState == .disconnected) ? minDisconnectedWidth : minConnectedWidth
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = true
+        bezelStyle = .toolbar
+        setButtonType(.momentaryPushIn)
+        imagePosition = .noImage
+        lineBreakMode = .byClipping
+        focusRingType = .default
+        setAccessibilityRole(.popUpButton)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        refreshTitle(forceInvalidateSize: true)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let width = min(max(desiredWidth, minimumDisplayWidth), maxButtonWidth)
+        return NSSize(width: width, height: max(super.intrinsicContentSize.height, 26))
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshTitle(forceInvalidateSize: false)
+    }
+
+    override func layout() {
+        super.layout()
+        // If a compressed window narrows the button below what the fitted title requires,
+        // re-fit the name/endpoint text so the trailing chevron remains visible.
+        if bounds.width > 0, bounds.width < fullTitleWidth + minimumBezelOverhead - 1 {
+            let constrainedBudget = max(48, bounds.width - horizontalPadding)
+            if lastRenderedWidthBudget != constrainedBudget {
+                attributedTitle = buildAttributedTitle(maxTextWidth: constrainedBudget)
+                lastRenderedWidthBudget = constrainedBudget
+            }
+        } else if lastRenderedWidthBudget != nil {
+            let fullBudget = maxButtonWidth - horizontalPadding
+            attributedTitle = buildAttributedTitle(maxTextWidth: fullBudget)
+            lastRenderedWidthBudget = nil
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        presentDropdownMenu()
+    }
+
+    override func performClick(_ sender: Any?) {
+        presentDropdownMenu()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Space (49), Return (36), Keypad Enter (76), Down Arrow (125)
+        if event.keyCode == 49 || event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 125 {
+            presentDropdownMenu()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        presentDropdownMenu()
+        return true
+    }
+
+    func refreshTitle(forceInvalidateSize: Bool) {
+        let maxTextWidth = maxButtonWidth - horizontalPadding
+        let fullTitle = buildAttributedTitle(maxTextWidth: maxTextWidth)
+        fullTitleWidth = ceil(fullTitle.size().width)
+        desiredWidth = fullTitleWidth + horizontalPadding
+        lastRenderedWidthBudget = nil
+        attributedTitle = fullTitle
+
+        if forceInvalidateSize {
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    private var horizontalPadding: CGFloat {
+        switch selectorState {
+        case .disconnected: return 24
+        case .connecting: return 26
+        case .connected: return 28
+        }
+    }
+
+    private func presentDropdownMenu() {
+        guard isEnabled, let menu = menuProvider?() else { return }
+        highlight(true)
+        defer { highlight(false) }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 6), in: self)
+    }
+
+    private func buildAttributedTitle(maxTextWidth: CGFloat) -> NSAttributedString {
+        let primaryFont = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        let secondaryFont = NSFont.systemFont(ofSize: 11.5)
+        let gapString = "  "
+        let gapWidth = (gapString as NSString).size(withAttributes: [.font: primaryFont]).width
+
+        let chevronImage = symbolImage(name: "chevron.down", pointSize: 9, weight: .semibold, color: .secondaryLabelColor)
+
+        switch selectorState {
+        case .disconnected:
+            let result = NSMutableAttributedString()
+            if let dbImage = symbolImage(name: "cylinder.split.1x2", pointSize: 12.5, weight: .medium, color: .secondaryLabelColor) {
+                result.append(attachmentString(for: dbImage, yOffset: -1.5))
+            }
+            result.append(NSAttributedString(string: gapString, attributes: [.font: primaryFont]))
+            if let chevronImage {
+                result.append(attachmentString(for: chevronImage, yOffset: 0.5))
+            }
+            return result
+
+        case .connecting:
+            let result = NSMutableAttributedString()
+            if let dotImage = symbolImage(name: "circle.fill", pointSize: 7, weight: .regular, color: .systemOrange) {
+                result.append(attachmentString(for: dotImage, yOffset: 1.5))
+                result.append(NSAttributedString(string: gapString, attributes: [.font: primaryFont]))
+            }
+            result.append(NSAttributedString(string: "Connecting…", attributes: [
+                .font: primaryFont,
+                .foregroundColor: NSColor.labelColor,
+            ]))
+            result.append(NSAttributedString(string: gapString, attributes: [.font: primaryFont]))
+            if let chevronImage {
+                result.append(attachmentString(for: chevronImage, yOffset: 0.5))
+            }
+            return result
+
+        case .connected(let name, let endpoint):
+            let dotImage = symbolImage(name: "circle.fill", pointSize: 7, weight: .regular, color: .systemGreen)
+            let fixedWidth = (dotImage?.size.width ?? 8) + gapWidth + gapWidth + (chevronImage?.size.width ?? 10)
+            let availableForText = max(60, maxTextWidth - fixedWidth)
+
+            let fitted = ConnectionDisplayFormatting.fitConnectedStrings(
+                name: name,
+                endpoint: endpoint,
+                availableTextWidth: availableForText,
+                gapWidth: gapWidth,
+                measureName: { ($0 as NSString).size(withAttributes: [.font: primaryFont]).width },
+                measureEndpoint: { ($0 as NSString).size(withAttributes: [.font: secondaryFont]).width }
+            )
+
+            let result = NSMutableAttributedString()
+            if let dotImage {
+                result.append(attachmentString(for: dotImage, yOffset: 1.5))
+                result.append(NSAttributedString(string: gapString, attributes: [.font: primaryFont]))
+            }
+            result.append(NSAttributedString(string: fitted.name, attributes: [
+                .font: primaryFont,
+                .foregroundColor: NSColor.labelColor,
+            ]))
+            if let fittedEndpoint = fitted.endpoint, !fittedEndpoint.isEmpty {
+                result.append(NSAttributedString(string: gapString + fittedEndpoint, attributes: [
+                    .font: secondaryFont,
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]))
+            }
+            result.append(NSAttributedString(string: gapString, attributes: [.font: primaryFont]))
+            if let chevronImage {
+                result.append(attachmentString(for: chevronImage, yOffset: 0.5))
+            }
+            return result
+        }
+    }
+
+    private func symbolImage(name: String, pointSize: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        return base.withSymbolConfiguration(config)
+    }
+
+    private func attachmentString(for image: NSImage, yOffset: CGFloat) -> NSAttributedString {
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: yOffset, width: image.size.width, height: image.size.height)
+        return NSAttributedString(attachment: attachment)
     }
 }
 

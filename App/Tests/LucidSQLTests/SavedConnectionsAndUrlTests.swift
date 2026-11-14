@@ -641,4 +641,103 @@ struct SavedConnectionsAndUrlTests {
         #expect(ConnectionDisplayFormatting.shouldAppendEndpoint(for: embeddedHostWithPort) == false)
         #expect(ConnectionDisplayFormatting.menuLabel(for: embeddedHostWithPort) == "Staging (db.internal:5433)")
     }
+
+    @Test("Connection selector state never leaks saved name when disconnected, handles connecting, and deduplicates endpoints")
+    func testConnectionSelectorStateTransitions() {
+        let profile = ConnectionProfile(
+            name: "Local Playground",
+            host: "127.0.0.1",
+            port: 5432,
+            database: "postgres",
+            user: "postgres"
+        )
+        let embeddedProfile = ConnectionProfile(
+            name: "astralgamesdb @ 194.104.94.64",
+            host: "194.104.94.64",
+            port: 4196,
+            database: "astralgamesdb",
+            user: "postgres"
+        )
+        let blankNameProfile = ConnectionProfile(
+            name: "   ",
+            host: "10.0.0.12",
+            port: 5433,
+            database: "app",
+            user: "app"
+        )
+
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: profile,
+                isConnected: false,
+                isConnecting: false
+            ) == .disconnected
+        )
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: nil,
+                isConnected: false,
+                isConnecting: true
+            ) == .connecting
+        )
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: profile,
+                isConnected: true,
+                isConnecting: true
+            ) == .connecting
+        )
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: profile,
+                isConnected: true,
+                isConnecting: false
+            ) == .connected(name: "Local Playground", endpoint: "127.0.0.1")
+        )
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: embeddedProfile,
+                isConnected: true,
+                isConnecting: false
+            ) == .connected(name: "astralgamesdb @ 194.104.94.64", endpoint: nil)
+        )
+        #expect(
+            ConnectionDisplayFormatting.selectorState(
+                activeProfile: blankNameProfile,
+                isConnected: true,
+                isConnecting: false
+            ) == .connected(name: "10.0.0.12:5433", endpoint: nil)
+        )
+    }
+
+    @Test("Connection selector truncation keeps both long names and endpoints non-empty within budget")
+    func testConnectionSelectorTruncationBudget() {
+        let measure: (String) -> CGFloat = { CGFloat($0.count) * 7.0 }
+
+        let shortFitted = ConnectionDisplayFormatting.fitConnectedStrings(
+            name: "Primary",
+            endpoint: "127.0.0.1",
+            availableTextWidth: 280,
+            gapWidth: 8,
+            measureName: measure,
+            measureEndpoint: measure
+        )
+        #expect(shortFitted.name == "Primary")
+        #expect(shortFitted.endpoint == "127.0.0.1")
+
+        let longFitted = ConnectionDisplayFormatting.fitConnectedStrings(
+            name: "Very Long Production Analytics Cluster Name Exceeding Toolbar Width",
+            endpoint: "db-analytics-prod-01.internal.example.com:5433",
+            availableTextWidth: 240,
+            gapWidth: 8,
+            measureName: measure,
+            measureEndpoint: measure
+        )
+        #expect(longFitted.name.hasSuffix("…"))
+        #expect(longFitted.name.count > 1)
+        #expect(longFitted.endpoint?.contains("…") == true)
+        #expect((longFitted.endpoint?.count ?? 0) > 1)
+        let totalWidth = measure(longFitted.name) + 8 + measure(longFitted.endpoint ?? "")
+        #expect(totalWidth <= 240)
+    }
 }
