@@ -88,8 +88,8 @@ public struct SchemaTreeView: View {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(Color.accentColor.opacity(0.12))
                             .frame(width: 24, height: 24)
-                        Image(systemName: "cylinder.split.1x2.fill")
-                            .font(.system(size: 11, weight: .semibold))
+                        Image(systemName: "cylinder.split.1x2")
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                     }
 
@@ -114,7 +114,7 @@ public struct SchemaTreeView: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
-                        .help("Open SQL Editor (⌘T)")
+                        .help("Switch to SQL Editor (⌘1)")
                     }
 
                     if model.isLoading {
@@ -208,9 +208,9 @@ public struct SchemaTreeView: View {
                                         onSelectTable(schema, table.tableName)
                                     } label: {
                                         HStack(spacing: 6) {
-                                            Image(systemName: table.isView ? "eye.fill" : "tablecells")
+                                            Image(systemName: table.isView ? "eye" : "tablecells")
                                                 .font(.system(size: 11))
-                                                .foregroundStyle(table.isView ? Color.purple.opacity(0.85) : Color.blue.opacity(0.85))
+                                                .foregroundStyle(.secondary)
                                                 .frame(width: 14)
 
                                             Text(table.tableName)
@@ -236,9 +236,9 @@ public struct SchemaTreeView: View {
                             }
                         } label: {
                             HStack(spacing: 6) {
-                                Image(systemName: "folder.fill")
+                                Image(systemName: "folder")
                                     .font(.system(size: 11))
-                                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                                    .foregroundStyle(.secondary)
                                 Text(schema)
                                     .font(.system(size: 12, weight: .medium))
                                 Spacer()

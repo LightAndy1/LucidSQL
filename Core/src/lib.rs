@@ -93,11 +93,17 @@ pub async fn test_database_connection(config: ConnectionConfig) -> Result<String
         })?
 }
 
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct TablePageResult {
+    pub columns: Vec<ColumnMetadata>,
+    pub page: RecordPage,
+}
+
 #[uniffi::export]
 pub async fn introspect_schemas(config: ConnectionConfig) -> Result<Vec<String>, LucidError> {
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
+            let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
             schema::query_schemas(&client).await
         })
@@ -116,7 +122,7 @@ pub async fn introspect_tables(
 ) -> Result<Vec<TableInfo>, LucidError> {
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
+            let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
             schema::query_tables(&client, &schema).await
         })
@@ -136,9 +142,46 @@ pub async fn introspect_columns(
 ) -> Result<Vec<ColumnMetadata>, LucidError> {
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
+            let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
             schema::query_columns(&client, &schema, &table).await
+        })
+        .await
+        .map_err(|e| LucidError::DatabaseError {
+            code: "58000".into(),
+            message: e.to_string(),
+            detail: None,
+        })?
+}
+
+#[uniffi::export]
+pub async fn load_table_page(
+    config: ConnectionConfig,
+    schema: String,
+    table: String,
+    offset: u64,
+    limit: u32,
+    sort_col: Option<String>,
+    sort_desc: bool,
+    known_has_primary_key: Option<bool>,
+) -> Result<TablePageResult, LucidError> {
+    get_runtime()
+        .spawn(async move {
+            let pool = connection::ManagedPool::shared(&config)?;
+            let client = pool.get().await?;
+            let (columns, has_pk) = match known_has_primary_key {
+                Some(has_pk) => (Vec::new(), has_pk),
+                None => {
+                    let cols = schema::query_columns(&client, &schema, &table).await?;
+                    let has_pk = cols.iter().any(|c| c.is_primary_key);
+                    (cols, has_pk)
+                }
+            };
+            let page = query::fetch_page(
+                &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
+            )
+            .await?;
+            Ok(TablePageResult { columns, page })
         })
         .await
         .map_err(|e| LucidError::DatabaseError {
@@ -160,7 +203,7 @@ pub async fn fetch_table_page(
 ) -> Result<RecordPage, LucidError> {
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
+            let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
             let cols = schema::query_columns(&client, &schema, &table).await?;
             let has_pk = cols.iter().any(|c| c.is_primary_key);
@@ -200,7 +243,7 @@ pub async fn apply_table_mutations(
 
     get_runtime()
         .spawn(async move {
-            let pool = connection::ManagedPool::new(&config)?;
+            let pool = connection::ManagedPool::shared(&config)?;
             let mut client = pool.get().await?;
             mutation::execute_batch_mutation(&mut client, request).await
         })
@@ -258,7 +301,10 @@ pub async fn close_session(session_id: String) -> Result<(), LucidError> {
 #[uniffi::export]
 pub async fn close_all_sessions() -> Result<(), LucidError> {
     get_runtime()
-        .spawn(async move { connection::close_all_sessions().await })
+        .spawn(async move {
+            connection::close_all_cached_pools();
+            connection::close_all_sessions().await
+        })
         .await
         .map_err(|e| LucidError::DatabaseError {
             code: "58000".into(),

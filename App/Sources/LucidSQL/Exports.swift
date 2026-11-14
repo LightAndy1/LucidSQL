@@ -5,6 +5,7 @@ extension ConnectionConfig: @unchecked Sendable {}
 extension ColumnMetadata: @unchecked Sendable {}
 extension TableInfo: @unchecked Sendable {}
 extension RecordPage: @unchecked Sendable {}
+extension TablePageResult: @unchecked Sendable {}
 extension RowData: @unchecked Sendable {}
 extension CellValue: @unchecked Sendable {}
 extension QueryResult: @unchecked Sendable {}
@@ -59,6 +60,28 @@ public func fetch_table_page(
     sortDesc: Bool = false
 ) async throws -> RecordPage {
     try await fetchTablePage(config: config, schema: schema, table: table, offset: offset, limit: limit, sortCol: sortCol, sortDesc: sortDesc)
+}
+
+public func load_table_page(
+    config: ConnectionConfig,
+    schema: String,
+    table: String,
+    offset: UInt64,
+    limit: UInt32,
+    sortCol: String? = nil,
+    sortDesc: Bool = false,
+    knownHasPrimaryKey: Bool? = nil
+) async throws -> TablePageResult {
+    try await loadTablePage(
+        config: config,
+        schema: schema,
+        table: table,
+        offset: offset,
+        limit: limit,
+        sortCol: sortCol,
+        sortDesc: sortDesc,
+        knownHasPrimaryKey: knownHasPrimaryKey
+    )
 }
 
 public func execute_query(

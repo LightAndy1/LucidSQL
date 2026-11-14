@@ -4,6 +4,11 @@ import LucidSQLBridge
 public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
     public static let identifier = NSUserInterfaceItemIdentifier("DataTableCellView")
 
+    private static let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private static let defaultBadgeFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+    private static let nullBadgeFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+    private static let unsupportedFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+
     public var onCommitEdit: ((String) -> Void)?
     public var onSetNull: (() -> Void)?
     public var onEditingStateChanged: ((Bool) -> Void)?
@@ -25,17 +30,22 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
     private var didEditText: Bool = false
     private var explicitEnterCommit: Bool = false
     private var pendingTabDirection: Int? = nil
+    private var lastVisualSignature: Int = 0
     private let customTextField: CellTextField
 
     public var isDirty: Bool = false {
         didSet {
-            updateBackgroundAndBorder()
+            if oldValue != isDirty {
+                updateBackgroundAndBorder()
+            }
         }
     }
 
     public var isSelectedCell: Bool = false {
         didSet {
-            updateBackgroundAndBorder()
+            if oldValue != isSelectedCell {
+                updateBackgroundAndBorder()
+            }
         }
     }
 
@@ -57,8 +67,12 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         customTextField.delegate = self
         customTextField.lineBreakMode = .byTruncatingTail
         customTextField.maximumNumberOfLines = 1
-        customTextField.translatesAutoresizingMaskIntoConstraints = false
-        endEditingVisualState()
+        customTextField.isEditable = false
+        customTextField.isSelectable = false
+        customTextField.isBezeled = false
+        customTextField.isBordered = false
+        customTextField.drawsBackground = false
+        customTextField.focusRingType = .none
 
         customTextField.onSetNullShortcut = { [weak self] in
             guard let self = self, self.isCellEditable, self.canSetNull else { return }
@@ -70,14 +84,38 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         }
 
         addSubview(customTextField)
-        NSLayoutConstraint.activate([
-            customTextField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            customTextField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            customTextField.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+    }
+
+    public override func layout() {
+        super.layout()
+        let textHeight: CGFloat = isActivelyEditing ? min(max(18, bounds.height - 4), 22) : 16
+        let insetX: CGFloat = isActivelyEditing ? 3 : 6
+        let y = floor((bounds.height - textHeight) * 0.5)
+        customTextField.frame = NSRect(
+            x: insetX,
+            y: y,
+            width: max(0, bounds.width - insetX * 2),
+            height: textHeight
+        )
+    }
+
+    private func visualSignature() -> Int {
+        var sig = 0
+        if isPendingDelete { sig |= 1 << 0 }
+        if isDirty { sig |= 1 << 1 }
+        if isDraftRow { sig |= 1 << 2 }
+        if isSelectedCell { sig |= 1 << 3 }
+        if isActivelyEditing { sig |= 1 << 4 }
+        return sig
     }
 
     private func updateBackgroundAndBorder() {
+        let sig = visualSignature()
+        if sig == lastVisualSignature {
+            return
+        }
+        lastVisualSignature = sig
+
         if isPendingDelete {
             layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.16).cgColor
         } else if isDirty {
@@ -87,7 +125,7 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         } else if isDraftRow {
             layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.08).cgColor
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.backgroundColor = nil
         }
 
         if isSelectedCell && !isActivelyEditing {
@@ -96,21 +134,25 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
                 ? NSColor.systemRed
                 : NSColor.controlAccentColor).withAlphaComponent(0.85).cgColor
             layer?.cornerRadius = 3
-        } else {
+        } else if (layer?.borderWidth ?? 0) != 0 {
             layer?.borderWidth = 0
-            layer?.borderColor = NSColor.clear.cgColor
+            layer?.borderColor = nil
             layer?.cornerRadius = 0
         }
     }
 
     private func endEditingVisualState() {
+        let wasEditing = isActivelyEditing
         isActivelyEditing = false
-        customTextField.isEditable = false
-        customTextField.isSelectable = false
-        customTextField.isBezeled = false
-        customTextField.isBordered = false
-        customTextField.drawsBackground = false
-        customTextField.focusRingType = .none
+        if wasEditing {
+            customTextField.isEditable = false
+            customTextField.isSelectable = false
+            customTextField.isBezeled = false
+            customTextField.isBordered = false
+            customTextField.drawsBackground = false
+            customTextField.focusRingType = .none
+            needsLayout = true
+        }
         updateBackgroundAndBorder()
     }
 
@@ -122,22 +164,24 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         if originalIsDefault {
             displayText = "DEFAULT"
             baseColor = NSColor.systemIndigo.withAlphaComponent(0.8)
-            baseFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+            baseFont = Self.defaultBadgeFont
         } else if originalIsNull {
             displayText = "NULL"
             baseColor = NSColor.tertiaryLabelColor
-            baseFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+            baseFont = Self.nullBadgeFont
         } else if originalIsUnsupported {
             displayText = originalString
             baseColor = NSColor.tertiaryLabelColor
-            baseFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+            baseFont = Self.unsupportedFont
         } else {
             displayText = originalString
             baseColor = isPendingDelete ? NSColor.systemRed.withAlphaComponent(0.9) : NSColor.labelColor
-            baseFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            baseFont = Self.monoFont
         }
 
-        customTextField.font = baseFont
+        if customTextField.font !== baseFont {
+            customTextField.font = baseFont
+        }
         customTextField.textColor = baseColor
         if isPendingDelete && !displayText.isEmpty {
             let attr = NSAttributedString(
@@ -188,7 +232,12 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
 
         endEditingVisualState()
         restoreOriginalDisplay()
-        toolTip = originalIsUnsupported ? originalString : (isPendingDelete ? "Staged for deletion (undo before editing)" : nil)
+        let desiredToolTip = originalIsUnsupported
+            ? originalString
+            : (isPendingDelete ? "Staged for deletion (undo before editing)" : nil)
+        if toolTip != desiredToolTip {
+            toolTip = desiredToolTip
+        }
     }
 
     public func beginEditing() {
@@ -211,9 +260,11 @@ public final class DataTableCellView: NSTableCellView, NSTextFieldDelegate {
         if originalIsNull || originalIsDefault {
             customTextField.stringValue = ""
             customTextField.textColor = NSColor.labelColor
-            customTextField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            customTextField.font = Self.monoFont
         }
 
+        needsLayout = true
+        layoutSubtreeIfNeeded()
         updateBackgroundAndBorder()
         onEditingStateChanged?(true)
 

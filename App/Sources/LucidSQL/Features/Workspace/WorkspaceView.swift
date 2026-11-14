@@ -221,6 +221,7 @@ public final class WorkspaceModel: ObservableObject {
 
     public func performConfirmedConnectionSwitch(to profile: ConnectionProfile, password: String?) async {
         let currentReadOnly = sqlWorkspace.defaultReadOnly
+        tableViewModel.cancelActiveLoad()
         tableViewModel.discardChanges()
         await performBoundedTeardown(timeoutSeconds: 2.5)
         self.selectedTable = ""
@@ -327,9 +328,7 @@ public final class WorkspaceModel: ObservableObject {
             guard let self = self else { return }
             self.selectedTable = "\(schema).\(table)"
             self.currentMode = .tableData
-            Task {
-                await self.tableViewModel.loadTable(config: config, schema: schema, table: table)
-            }
+            self.tableViewModel.startTableLoad(config: config, schema: schema, table: table)
         }
 
         if tableViewModel.hasPendingChanges || tableViewModel.hasUncertainCommitOutcome {
@@ -408,6 +407,7 @@ public final class WorkspaceModel: ObservableObject {
         pendingTableNavigationAction = nil
 
         let currentReadOnly = sqlWorkspace.defaultReadOnly
+        tableViewModel.cancelActiveLoad()
         tableViewModel.discardChanges()
         await performBoundedTeardown(timeoutSeconds: 2.5)
 
@@ -643,98 +643,7 @@ public struct WorkspaceView: View {
             }
         }
         .toolbar {
-            if model.activeConfig != nil {
-                ToolbarItem(placement: .automatic) {
-                    HStack(spacing: 6) {
-                        Picker("View", selection: $model.currentMode) {
-                            Label("SQL Editor", systemImage: "terminal").tag(WorkspaceModel.WorkspaceMode.sqlEditor)
-                            Label("Table Data", systemImage: "tablecells").tag(WorkspaceModel.WorkspaceMode.tableData)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 190)
-                        .help("Switch between SQL Editor (⌘1) and Table Data (⌘2)")
-
-                        Button {
-                            model.openNewSqlTab()
-                        } label: {
-                            Image(systemName: "plus.rectangle.on.rectangle")
-                        }
-                        .keyboardShortcut("t", modifiers: [.command])
-                        .help("New SQL Tab (⌘T)")
-                    }
-                }
-            }
-
-            ToolbarItem(placement: .principal) {
-                Button {
-                    model.openConnectionDialog()
-                } label: {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(model.activeConfig != nil ? Color.green : Color.secondary.opacity(0.4))
-                            .frame(width: 7, height: 7)
-
-                        if let profile = model.activeProfile {
-                            Text(profile.name)
-                                .font(.system(size: 11, weight: .medium))
-                            Text("(\(profile.host):\(profile.port))")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        } else if let selected = model.selectedSavedProfile {
-                            Text("Selected: \(selected.name)")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Not Connected")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(Color(NSColor.separatorColor).opacity(0.35), lineWidth: 0.5)
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Saved Connections & Quick Switch (⌘⇧O)")
-            }
-
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 8) {
-                    Button {
-                        model.isShowingSettingsSheet = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .help("Settings & Draft Privacy (⌘,)")
-
-                    if model.activeConfig != nil {
-                        SecondaryActionButton(
-                            title: "Disconnect",
-                            icon: "eject.fill",
-                            size: .regular
-                        ) {
-                            model.disconnect()
-                        }
-                        .help("Disconnect from Database")
-                    } else {
-                        PrimaryActionButton(
-                            title: "Connect",
-                            icon: "cable.connector",
-                            size: .regular
-                        ) {
-                            model.openConnectionDialog()
-                        }
-                        .help("Open Connections (⌘N)")
-                    }
-                }
-            }
+            workspaceToolbar
         }
         .sheet(isPresented: $model.isShowingConnectionSheet) {
             ConnectionDialogView(
@@ -901,5 +810,199 @@ private struct WorkspaceDetailBackground: View {
             VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
             #endif
         }
+    }
+}
+
+private struct ToolbarWorkspaceModePicker: View {
+    @Binding var selection: WorkspaceModel.WorkspaceMode
+
+    var body: some View {
+        Picker("Workspace Mode", selection: $selection) {
+            Label("SQL Editor", systemImage: "terminal")
+                .tag(WorkspaceModel.WorkspaceMode.sqlEditor)
+            Label("Table Data", systemImage: "tablecells")
+                .tag(WorkspaceModel.WorkspaceMode.tableData)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .help("Switch Workspace Mode: SQL Editor (⌘1) · Table Data (⌘2)")
+    }
+}
+
+private struct ToolbarConnectionSelector: View {
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        Button {
+            model.openConnectionDialog()
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(model.activeConfig != nil ? Color.green : Color.secondary.opacity(0.45))
+                    .frame(width: 7, height: 7)
+
+                if let profile = model.activeProfile {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 5) {
+                            Text(profile.name)
+                                .font(.system(size: 12, weight: .medium))
+                                .fixedSize(horizontal: true, vertical: false)
+                            Text(hostSummary(for: profile))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+
+                        HStack(spacing: 5) {
+                            Text(profile.name)
+                                .font(.system(size: 12, weight: .medium))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            if !hostSummary(for: profile).isEmpty {
+                                Text(hostSummary(for: profile))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(minWidth: 72)
+                            }
+                        }
+
+                        Text(profile.name)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                } else if let selected = model.selectedSavedProfile {
+                    Text(selected.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("Not Connected")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: 280)
+        }
+        .buttonStyle(.plain)
+        .help(tooltipText)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private func hostSummary(for profile: ConnectionProfile) -> String {
+        profile.port == 5432 ? profile.host : "\(profile.host):\(profile.port)"
+    }
+
+    private var tooltipText: String {
+        if let profile = model.activeProfile {
+            return "\(profile.name)\n\(profile.user)@\(profile.host):\(profile.port)/\(profile.database) (SSL: \(profile.sslMode))\nClick to switch or manage connections (⌘⇧O)"
+        }
+        if let selected = model.selectedSavedProfile {
+            return "Selected profile: \(selected.name) (\(selected.user)@\(selected.host):\(selected.port)/\(selected.database))\nClick to connect or switch profiles (⌘⇧O)"
+        }
+        return "Saved Connections & Quick Switch (⌘⇧O)"
+    }
+
+    private var accessibilityText: String {
+        if let profile = model.activeProfile {
+            return "Connected to \(profile.name), \(profile.host)"
+        }
+        if let selected = model.selectedSavedProfile {
+            return "Selected profile \(selected.name), not connected"
+        }
+        return "Not connected, open connections"
+    }
+}
+
+private extension WorkspaceView {
+    @ToolbarContentBuilder
+    var workspaceToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            ToolbarConnectionSelector(model: model)
+        }
+
+        if model.activeConfig != nil {
+            ToolbarItem(placement: .automatic) {
+                ToolbarWorkspaceModePicker(selection: $model.currentMode)
+            }
+
+            newSqlTabToolbarItem
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                model.isShowingSettingsSheet = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .labelStyle(.iconOnly)
+            .help("Settings & Draft Privacy (⌘,)")
+            .accessibilityLabel("Settings")
+
+            if model.activeConfig != nil {
+                Button {
+                    model.disconnect()
+                } label: {
+                    Label("Disconnect", systemImage: "cable.connector.slash")
+                }
+                .labelStyle(.iconOnly)
+                .help("Disconnect from Database")
+                .accessibilityLabel("Disconnect from Database")
+            } else {
+                Button {
+                    model.openConnectionDialog()
+                } label: {
+                    Label("Connect", systemImage: "cable.connector")
+                }
+                .labelStyle(.titleAndIcon)
+                .help("Open Connections (⌘N)")
+                .accessibilityLabel("Connect to Database")
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    var newSqlTabToolbarItem: some ToolbarContent {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .automatic) {
+                newSqlTabButton
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .automatic) {
+                newSqlTabButton
+            }
+        }
+        #else
+        ToolbarItem(placement: .automatic) {
+            newSqlTabButton
+        }
+        #endif
+    }
+
+    var newSqlTabButton: some View {
+        Button {
+            model.openNewSqlTab()
+        } label: {
+            Label("New SQL Tab", systemImage: "plus.rectangle.on.rectangle")
+        }
+        .labelStyle(.iconOnly)
+        .keyboardShortcut("t", modifiers: [.command])
+        .help("New SQL Tab (⌘T)")
+        .accessibilityLabel("New SQL Tab")
     }
 }

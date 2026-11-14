@@ -285,33 +285,61 @@ public struct DataTableView: NSViewRepresentable {
             let currentHash = columns.map {
                 "\($0.name)_\($0.pgTypeName)_\($0.isPrimaryKey)_\($0.isGenerated)_\($0.isIdentityAlways)"
             }.joined().hashValue
-            if currentHash == lastColumnHash && tableView.tableColumns.count == columns.count + 1 {
+            let targetCount = columns.count + 1
+            if currentHash == lastColumnHash && tableView.tableColumns.count == targetCount {
                 return false
             }
             lastColumnHash = currentHash
 
-            while !tableView.tableColumns.isEmpty {
-                tableView.removeTableColumn(tableView.tableColumns[0])
+            // Reuse existing NSTableColumn instances in place to avoid AppKit per-column add/remove layout churn.
+            if tableView.tableColumns.isEmpty {
+                let indexCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_index"))
+                indexCol.title = "#"
+                indexCol.width = 48
+                indexCol.minWidth = 40
+                indexCol.maxWidth = 68
+                indexCol.headerCell.alignment = .center
+                tableView.addTableColumn(indexCol)
+            } else {
+                let indexCol = tableView.tableColumns[0]
+                if indexCol.identifier.rawValue != "col_index" {
+                    indexCol.identifier = NSUserInterfaceItemIdentifier("col_index")
+                }
+                indexCol.title = "#"
+                indexCol.minWidth = 40
+                indexCol.maxWidth = 68
+                indexCol.width = 48
+                indexCol.headerCell.alignment = .center
             }
 
-            // 1. Row Index Header Column
-            let indexCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_index"))
-            indexCol.title = "#"
-            indexCol.width = 48
-            indexCol.minWidth = 40
-            indexCol.maxWidth = 68
-            indexCol.headerCell.alignment = .center
-            tableView.addTableColumn(indexCol)
+            while tableView.tableColumns.count > targetCount {
+                if let last = tableView.tableColumns.last {
+                    tableView.removeTableColumn(last)
+                }
+            }
 
-            // 2. Data Columns
             for (idx, col) in columns.enumerated() {
                 let colId = NSUserInterfaceItemIdentifier("col_\(idx)")
-                let tableCol = NSTableColumn(identifier: colId)
                 let pkPrefix = col.isPrimaryKey ? "🔑 " : ((col.isGenerated || col.isIdentityAlways) ? "⚡ " : "")
-                tableCol.title = "\(pkPrefix)\(col.name)"
-                tableCol.width = max(110, CGFloat(col.name.count * 10 + 40))
-                tableCol.minWidth = 60
-                tableView.addTableColumn(tableCol)
+                let title = "\(pkPrefix)\(col.name)"
+                let desiredWidth = max(110, CGFloat(col.name.count * 10 + 40))
+
+                if idx + 1 < tableView.tableColumns.count {
+                    let tableCol = tableView.tableColumns[idx + 1]
+                    tableCol.identifier = colId
+                    tableCol.title = title
+                    tableCol.minWidth = 60
+                    tableCol.maxWidth = 10_000
+                    tableCol.width = desiredWidth
+                    tableCol.headerCell.alignment = .natural
+                } else {
+                    let tableCol = NSTableColumn(identifier: colId)
+                    tableCol.title = title
+                    tableCol.minWidth = 60
+                    tableCol.maxWidth = 10_000
+                    tableCol.width = desiredWidth
+                    tableView.addTableColumn(tableCol)
+                }
             }
             return true
         }

@@ -19,16 +19,19 @@ public struct TableDataContainerView: View {
     public var body: some View {
         VStack(spacing: 0) {
             // Header Bar
-            HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 // Table Identity
-                HStack(spacing: 6) {
-                    Image(systemName: "tablecells.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.accentColor)
+                HStack(spacing: 5) {
+                    Image(systemName: "tablecells")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
 
                     Text(viewModel.currentTable)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(2)
+                        .help("\(viewModel.currentSchema).\(viewModel.currentTable)")
 
                     Text(viewModel.currentSchema)
                         .font(.system(size: 11))
@@ -118,8 +121,9 @@ public struct TableDataContainerView: View {
                         .background(Color.orange.opacity(0.12), in: Capsule())
                     }
                 }
+                .layoutPriority(1)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 // Row Add / Delete Controls
                 if viewModel.isEditable && !viewModel.columns.isEmpty {
@@ -134,6 +138,8 @@ public struct TableDataContainerView: View {
                                 Text("Add Row")
                                     .font(.system(size: 11, weight: .medium))
                             }
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -153,6 +159,8 @@ public struct TableDataContainerView: View {
                                 Text(selectedIsPendingDelete ? "Undo Delete" : "Delete")
                                     .font(.system(size: 11, weight: .medium))
                             }
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -200,11 +208,24 @@ public struct TableDataContainerView: View {
                     NSApp.keyWindow?.makeFirstResponder(nil)
                     _ = viewModel.prepareCsvExport(config: config)
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Export CSV")
-                            .font(.system(size: 11, weight: .medium))
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Export CSV")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+
+                        HStack(spacing: 3) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("CSV")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                 }
                 .buttonStyle(.bordered)
@@ -213,7 +234,7 @@ public struct TableDataContainerView: View {
                 .help("Export current page or full table data to CSV")
 
                 // Compact Pagination Controls
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Button {
                         viewModel.previousPage(config: config)
                     } label: {
@@ -228,8 +249,10 @@ public struct TableDataContainerView: View {
                     Text(rowCountText)
                         .font(.system(size: 11, design: .monospaced))
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 3)
 
                     Button {
                         viewModel.nextPage(config: config)
@@ -244,7 +267,7 @@ public struct TableDataContainerView: View {
 
                     Divider()
                         .frame(height: 14)
-                        .padding(.horizontal, 2)
+                        .padding(.horizontal, 1)
 
                     Button {
                         viewModel.reloadTable(config: config)
@@ -258,7 +281,7 @@ public struct TableDataContainerView: View {
                     .help("Reload Table")
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(.ultraThinMaterial)
 
@@ -273,7 +296,7 @@ public struct TableDataContainerView: View {
                     Text(status)
                         .font(.caption)
                         .foregroundStyle(.green)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Button {
                         viewModel.statusMessage = nil
                     } label: {
@@ -299,7 +322,7 @@ public struct TableDataContainerView: View {
                         .font(.caption)
                         .foregroundStyle(viewModel.hasUncertainCommitOutcome ? .orange : .red)
                         .textSelection(.enabled)
-                    Spacer()
+                    Spacer(minLength: 4)
                     if viewModel.hasUncertainCommitOutcome {
                         Button("Reload & Reconcile") {
                             Task {
@@ -326,42 +349,56 @@ public struct TableDataContainerView: View {
                 Divider()
             }
 
-            // Grid View or Empty State - stable readable surface
-            if viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty && !viewModel.isLoading {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.secondary.opacity(0.08))
-                            .frame(width: 54, height: 54)
-                        Image(systemName: "tablecells")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text("No records found in \(viewModel.currentTable)")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    if viewModel.isEditable && !viewModel.columns.isEmpty {
-                        Button {
-                            viewModel.addDraftRow()
-                        } label: {
-                            Label("Add Row", systemImage: "plus")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(NSColor.textBackgroundColor))
-            } else {
+            // Grid View, Immediate Loading State, or Empty State (keep DataTableView mounted for cell/column reuse)
+            ZStack {
                 DataTableView(
                     viewModel: viewModel,
                     renderSignature: DataTableView.RenderSignature(from: viewModel)
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(NSColor.textBackgroundColor))
+
+                if viewModel.isLoading && viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty {
+                    VStack(spacing: 10) {
+                        Spacer(minLength: 4)
+                        ProgressView()
+                            .controlSize(.regular)
+                        Text("Loading \(viewModel.currentSchema).\(viewModel.currentTable)…")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(NSColor.textBackgroundColor))
+                } else if viewModel.rows.isEmpty && viewModel.stagedInserts.isEmpty {
+                    VStack(spacing: 12) {
+                        Spacer(minLength: 4)
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color.secondary.opacity(0.08))
+                                .frame(width: 54, height: 54)
+                            Image(systemName: "tablecells")
+                                .font(.system(size: 26))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text("No records found in \(viewModel.currentTable)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        if viewModel.isEditable && !viewModel.columns.isEmpty {
+                            Button {
+                                viewModel.addDraftRow()
+                            } label: {
+                                Label("Add Row", systemImage: "plus")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                        Spacer(minLength: 4)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(NSColor.textBackgroundColor))
+                }
             }
 
             Divider()
@@ -373,7 +410,7 @@ public struct TableDataContainerView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if viewModel.isEditable {
                     Text("Double-click or Enter to edit • Tab to advance • ⎋ to cancel • ⌥⌘N for NULL • Right-click for row menu")
@@ -389,7 +426,7 @@ public struct TableDataContainerView: View {
                         .truncationMode(.tail)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if viewModel.hasPendingChanges {
                     HStack(spacing: 4) {

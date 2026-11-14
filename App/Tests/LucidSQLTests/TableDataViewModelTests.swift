@@ -746,4 +746,87 @@ struct TableDataViewModelTests {
         let backward = coord.findNextEditableCoordinate(fromRow: 2, fromTableCol: 2, direction: -1, totalRows: 3, totalTableCols: 4)
         #expect(backward?.row == 0 && backward?.tableCol == 2)
     }
+
+    @Test("Verify rapid table switch cancels/discards stale slow result and shows immediate loading feedback")
+    @MainActor
+    func testStaleTableSwitchDiscardsSupersededLoad() async throws {
+        let config = getLocalConfig()
+        let schema = "s_stale_\(Int.random(in: 1000...9999))"
+        let setupSql = """
+        CREATE SCHEMA \(schema);
+        CREATE TABLE \(schema).fast_items (id int PRIMARY KEY, label text NOT NULL);
+        INSERT INTO \(schema).fast_items SELECT g, 'row_' || g FROM generate_series(1, 20) g;
+        CREATE VIEW \(schema).slow_view AS
+        SELECT pg_sleep(0.25)::text AS waited, id FROM \(schema).fast_items LIMIT 2;
+        """
+        _ = try await execute_query(config: config, sql: setupSql, queryId: UUID().uuidString)
+
+        let vm = TableDataViewModel()
+        vm.startTableLoad(config: config, schema: schema, table: "slow_view")
+        #expect(vm.isLoading == true)
+        #expect(vm.currentTable == "slow_view")
+
+        try? await Task.sleep(for: .milliseconds(15))
+        await vm.loadTable(config: config, schema: schema, table: "fast_items")
+
+        #expect(vm.currentSchema == schema)
+        #expect(vm.currentTable == "fast_items")
+        #expect(vm.columns.count == 2)
+        #expect(vm.rows.count == 20)
+        #expect(vm.isLoading == false)
+
+        // Allow slow_view's superseded request enough time to settle and confirm it cannot overwrite fast_items.
+        try? await Task.sleep(for: .milliseconds(350))
+        #expect(vm.currentTable == "fast_items")
+        #expect(vm.columns.count == 2)
+        #expect(vm.rows.count == 20)
+        #expect(vm.isLoading == false)
+
+        _ = try? await execute_query(config: config, sql: "DROP SCHEMA IF EXISTS \(schema) CASCADE;", queryId: UUID().uuidString)
+    }
+
+    @Test("Verify DataTableView syncColumns reuses NSTableColumn instances cleanly across wide and narrow tables")
+    @MainActor
+    func testSyncColumnsReusesColumnsCleanly() {
+        let vm = TableDataViewModel()
+        let tableView = LucidDataTableView()
+        let coord = DataTableView(viewModel: vm).makeCoordinator()
+
+        func makeCols(_ count: Int, prefix: String) -> [ColumnMetadata] {
+            (0..<count).map { idx in
+                ColumnMetadata(
+                    name: "\(prefix)_\(idx)",
+                    ordinalPosition: UInt32(idx + 1),
+                    pgTypeName: "text",
+                    pgTypeOid: 25,
+                    isPrimaryKey: idx == 0,
+                    isNullable: idx != 0,
+                    defaultValue: nil,
+                    isGenerated: false,
+                    isIdentity: false,
+                    isIdentityAlways: false
+                )
+            }
+        }
+
+        let changed1 = coord.syncColumns(tableView: tableView, columns: makeCols(10, prefix: "a"))
+        #expect(changed1 == true)
+        #expect(tableView.tableColumns.count == 11)
+        let firstDataColRef = tableView.tableColumns[1]
+
+        let unchanged = coord.syncColumns(tableView: tableView, columns: makeCols(10, prefix: "a"))
+        #expect(unchanged == false)
+
+        let changed2 = coord.syncColumns(tableView: tableView, columns: makeCols(3, prefix: "b"))
+        #expect(changed2 == true)
+        #expect(tableView.tableColumns.count == 4)
+        #expect(tableView.tableColumns[1] === firstDataColRef)
+        #expect(tableView.tableColumns[1].title.contains("b_0"))
+
+        let changed3 = coord.syncColumns(tableView: tableView, columns: makeCols(15, prefix: "c"))
+        #expect(changed3 == true)
+        #expect(tableView.tableColumns.count == 16)
+        #expect(tableView.tableColumns[0].identifier.rawValue == "col_index")
+        #expect(tableView.tableColumns[15].identifier.rawValue == "col_14")
+    }
 }

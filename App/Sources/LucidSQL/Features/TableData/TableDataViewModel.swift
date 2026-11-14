@@ -35,6 +35,9 @@ public final class TableDataViewModel: @unchecked Sendable {
     public var sortDescending: Bool = false
     public var exportViewModel: CsvExportViewModel? = nil
 
+    private var activeLoadTask: Task<Void, Never>? = nil
+    private var loadGeneration: UInt64 = 0
+
     public struct GridCoordinate: Hashable, Sendable {
         public let row: Int
         public let column: Int
@@ -399,7 +402,20 @@ public final class TableDataViewModel: @unchecked Sendable {
         return issues
     }
 
-    public func loadTable(config: ConnectionConfig, schema: String, table: String) async {
+    public func cancelActiveLoad() {
+        activeLoadTask?.cancel()
+        activeLoadTask = nil
+        loadGeneration &+= 1
+        isLoading = false
+    }
+
+    @discardableResult
+    public func beginTableNavigation(schema: String, table: String) -> UInt64 {
+        activeLoadTask?.cancel()
+        activeLoadTask = nil
+        loadGeneration &+= 1
+
+        let switchingTables = self.currentSchema != schema || self.currentTable != table
         self.currentSchema = schema
         self.currentTable = table
         self.offset = 0
@@ -407,33 +423,94 @@ public final class TableDataViewModel: @unchecked Sendable {
         self.sortDescending = false
         self.clearStagedChanges()
         self.statusMessage = nil
-        await fetchPage(config: config)
+        self.errorMessage = nil
+        if switchingTables {
+            self.columns = []
+            self.rows = []
+            self.hasMore = false
+            self.executionDurationMs = 0
+            self.dataVersion &+= 1
+        }
+        self.isLoading = true
+        return self.loadGeneration
     }
 
-    public func fetchPage(config: ConnectionConfig) async {
+    public func startTableLoad(config: ConnectionConfig, schema: String, table: String) {
+        let generation = beginTableNavigation(schema: schema, table: table)
+        activeLoadTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            await self.fetchPage(config: config, refreshColumns: true, generation: generation)
+        }
+    }
+
+    public func loadTable(config: ConnectionConfig, schema: String, table: String) async {
+        let generation = beginTableNavigation(schema: schema, table: table)
+        await fetchPage(config: config, refreshColumns: true, generation: generation)
+    }
+
+    public func fetchPage(
+        config: ConnectionConfig,
+        refreshColumns: Bool = false,
+        generation: UInt64? = nil
+    ) async {
         guard !currentTable.isEmpty else { return }
+        let requestGen: UInt64
+        if let generation {
+            requestGen = generation
+        } else {
+            activeLoadTask?.cancel()
+            activeLoadTask = nil
+            loadGeneration &+= 1
+            requestGen = loadGeneration
+        }
+
+        let targetSchema = currentSchema
+        let targetTable = currentTable
+        let targetOffset = offset
+        let targetSortCol = sortColumn
+        let targetSortDesc = sortDescending
+        let needsColumns = refreshColumns || columns.isEmpty
+        let knownHasPK: Bool? = needsColumns ? nil : hasPrimaryKey
+
         self.isLoading = true
         self.errorMessage = nil
 
         do {
-            let cols = try await introspect_columns(config: config, schema: currentSchema, table: currentTable)
-            let page = try await fetch_table_page(
+            let result = try await load_table_page(
                 config: config,
-                schema: currentSchema,
-                table: currentTable,
-                offset: offset,
+                schema: targetSchema,
+                table: targetTable,
+                offset: targetOffset,
                 limit: limit,
-                sortCol: sortColumn,
-                sortDesc: sortDescending
+                sortCol: targetSortCol,
+                sortDesc: targetSortDesc,
+                knownHasPrimaryKey: knownHasPK
             )
 
-            self.columns = cols
-            self.rows = page.rows
-            self.hasMore = page.hasMore
-            self.executionDurationMs = page.executionDurationMs
+            guard !Task.isCancelled,
+                  requestGen == self.loadGeneration,
+                  self.currentSchema == targetSchema,
+                  self.currentTable == targetTable else {
+                return
+            }
+
+            if needsColumns {
+                self.columns = result.columns
+            }
+            self.rows = result.page.rows
+            self.hasMore = result.page.hasMore
+            self.executionDurationMs = result.page.executionDurationMs
             self.dataVersion &+= 1
             self.isLoading = false
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled,
+                  requestGen == self.loadGeneration,
+                  self.currentSchema == targetSchema,
+                  self.currentTable == targetTable else {
+                return
+            }
             self.errorMessage = error.userFacingMessage
             self.isLoading = false
         }
@@ -473,8 +550,15 @@ public final class TableDataViewModel: @unchecked Sendable {
         guard hasMore else { return }
         safeNavigate { [weak self] in
             guard let self = self else { return }
+            self.activeLoadTask?.cancel()
+            self.loadGeneration &+= 1
+            let generation = self.loadGeneration
             self.offset += UInt64(self.limit)
-            Task { await self.fetchPage(config: config) }
+            self.isLoading = true
+            self.errorMessage = nil
+            self.activeLoadTask = Task { @MainActor [weak self] in
+                await self?.fetchPage(config: config, refreshColumns: false, generation: generation)
+            }
         }
     }
 
@@ -482,15 +566,29 @@ public final class TableDataViewModel: @unchecked Sendable {
         guard offset >= UInt64(limit) else { return }
         safeNavigate { [weak self] in
             guard let self = self else { return }
+            self.activeLoadTask?.cancel()
+            self.loadGeneration &+= 1
+            let generation = self.loadGeneration
             self.offset -= UInt64(self.limit)
-            Task { await self.fetchPage(config: config) }
+            self.isLoading = true
+            self.errorMessage = nil
+            self.activeLoadTask = Task { @MainActor [weak self] in
+                await self?.fetchPage(config: config, refreshColumns: false, generation: generation)
+            }
         }
     }
 
     public func reloadTable(config: ConnectionConfig) {
         safeNavigate { [weak self] in
             guard let self = self else { return }
-            Task { await self.fetchPage(config: config) }
+            self.activeLoadTask?.cancel()
+            self.loadGeneration &+= 1
+            let generation = self.loadGeneration
+            self.isLoading = true
+            self.errorMessage = nil
+            self.activeLoadTask = Task { @MainActor [weak self] in
+                await self?.fetchPage(config: config, refreshColumns: true, generation: generation)
+            }
         }
     }
 
@@ -499,7 +597,7 @@ public final class TableDataViewModel: @unchecked Sendable {
         errorMessage = nil
         statusMessage = nil
         showingReviewSheet = false
-        await fetchPage(config: config)
+        await fetchPage(config: config, refreshColumns: true)
     }
 
     public func recordUncertainCommitOutcome(message: String) {
