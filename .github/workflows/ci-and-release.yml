@@ -12,16 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (optional, e.g. 0.1.0); defaults to tag or dev-<shortsha>"
+        description: "Version (optional for dev build; required if publish_release is true, e.g. 0.1.0)"
         required: false
         type: string
       publish_release:
         description: "Publish a GitHub Release (manual dispatch only)"
-        required: false
-        type: boolean
-        default: false
-      allow_unsigned_prerelease:
-        description: "Explicitly publish an ad-hoc/unsigned GitHub Prerelease when Developer ID & notarization secrets are not configured"
         required: false
         type: boolean
         default: false
@@ -35,14 +30,13 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build, Test & Package (macOS arm64)
-    runs-on: macos-15
+    name: Build, Test & Package DMG (macOS arm64)
+    runs-on: macos-26
     timeout-minutes: 45
 
     outputs:
       is_release: ${{ steps.mode.outputs.is_release }}
       is_prerelease: ${{ steps.mode.outputs.is_prerelease }}
-      is_signed_notarized: ${{ steps.mode.outputs.is_signed_notarized }}
       release_tag: ${{ steps.mode.outputs.release_tag }}
       version: ${{ steps.mode.outputs.version }}
       archive_name: ${{ steps.mode.outputs.archive_name }}
@@ -57,17 +51,16 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
-          INPUT_ALLOW_UNSIGNED: ${{ inputs.allow_unsigned_prerelease }}
-          HAS_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12 != '' }}
-          HAS_CERT_PW: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD != '' }}
-          HAS_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID != '' }}
-          HAS_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID != '' }}
-          HAS_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
           SHORT_SHA="${GITHUB_SHA::7}"
           ARCH="$(uname -m)"
           echo "Runner macOS: $(sw_vers -productVersion) (${ARCH})"
+
+          if [[ "${ARCH}" != "arm64" ]]; then
+            echo "::error::Expected Apple Silicon (arm64) runner, got '${ARCH}'."
+            exit 1
+          fi
 
           IS_TAG_RELEASE="false"
           IS_MANUAL_RELEASE="false"
@@ -82,76 +75,46 @@ jobs:
             IS_RELEASE="true"
           fi
 
-          if [[ "${HAS_CERT_P12}" == "true" && "${HAS_CERT_PW}" == "true" && "${HAS_NOTARY_KEY_ID}" == "true" && "${HAS_NOTARY_ISSUER_ID}" == "true" && "${HAS_NOTARY_PRIVATE_KEY}" == "true" ]]; then
-            HAS_FULL_SIGNING="true"
-          else
-            HAS_FULL_SIGNING="false"
+          if [[ "${IS_MANUAL_RELEASE}" == "true" && -z "${INPUT_VERSION}" ]]; then
+            echo "::error::Manual release dispatch requires an explicit 'version' input (e.g. 0.1.0)."
+            exit 1
           fi
-
-          MISSING_SECRETS=()
-          [[ "${HAS_CERT_P12}" != "true" ]] && MISSING_SECRETS+=("APPLE_DEVELOPER_ID_CERT_P12")
-          [[ "${HAS_CERT_PW}" != "true" ]] && MISSING_SECRETS+=("APPLE_DEVELOPER_ID_CERT_PASSWORD")
-          [[ "${HAS_NOTARY_KEY_ID}" != "true" ]] && MISSING_SECRETS+=("APPLE_NOTARY_KEY_ID")
-          [[ "${HAS_NOTARY_ISSUER_ID}" != "true" ]] && MISSING_SECRETS+=("APPLE_NOTARY_ISSUER_ID")
-          [[ "${HAS_NOTARY_PRIVATE_KEY}" != "true" ]] && MISSING_SECRETS+=("APPLE_NOTARY_PRIVATE_KEY")
 
           IS_PRERELEASE="false"
-          SIGNING_MODE="adhoc"
-          SHOULD_NOTARIZE="false"
-
-          if [[ "${IS_RELEASE}" == "true" ]]; then
-            if [[ "${HAS_FULL_SIGNING}" == "true" ]]; then
-              SIGNING_MODE="developer-id"
-              SHOULD_NOTARIZE="true"
-              if [[ "${GITHUB_REF}" == refs/tags/* && "${GITHUB_REF_NAME}" == *-* ]]; then
-                IS_PRERELEASE="true"
-              fi
-            elif [[ "${IS_MANUAL_RELEASE}" == "true" && "${INPUT_ALLOW_UNSIGNED}" == "true" ]]; then
-              SIGNING_MODE="adhoc"
-              SHOULD_NOTARIZE="false"
-              IS_PRERELEASE="true"
-              echo "::warning::Publishing an explicit unsigned/ad-hoc GitHub Prerelease because allow_unsigned_prerelease=true."
-            else
-              echo "::error::Release blocked: Developer ID signing and Apple notarization secrets are not configured."
-              echo "Missing GitHub Actions secrets: ${MISSING_SECRETS[*]}"
-              echo "Public releases never fall back to unsigned builds automatically."
-              echo "Either configure the required secrets or manually dispatch this workflow with publish_release=true and allow_unsigned_prerelease=true."
-              exit 1
-            fi
-          fi
-
           if [[ "${IS_TAG_RELEASE}" == "true" ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
             VERSION="${RELEASE_TAG#v}"
+            if [[ "${RELEASE_TAG}" == *-* ]]; then
+              IS_PRERELEASE="true"
+            fi
           elif [[ -n "${INPUT_VERSION}" ]]; then
             VERSION="${INPUT_VERSION#v}"
             RELEASE_TAG="v${VERSION}"
+            if [[ "${VERSION}" == *-* ]]; then
+              IS_PRERELEASE="true"
+            fi
           else
             VERSION="0.1.0-dev.${SHORT_SHA}"
             RELEASE_TAG=""
           fi
 
-          if [[ "${SIGNING_MODE}" == "developer-id" ]]; then
-            ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${ARCH}"
-            ARTIFACT_NAME="LucidSQL-${VERSION}-signed-notarized-macos-${ARCH}"
+          ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${ARCH}"
+          if [[ "${IS_RELEASE}" == "true" ]]; then
+            ARTIFACT_NAME="LucidSQL-${VERSION}-macos-${ARCH}-dmg"
           else
-            ARCHIVE_NAME="LucidSQL-${VERSION}-adhoc-unsigned-macos-${ARCH}"
-            ARTIFACT_NAME="LucidSQL-dev-adhoc-unsigned-macos-${ARCH}"
+            ARTIFACT_NAME="LucidSQL-dev-macos-${ARCH}-dmg"
           fi
 
           {
             echo "is_release=${IS_RELEASE}"
             echo "is_prerelease=${IS_PRERELEASE}"
-            echo "is_signed_notarized=$( [[ "${SIGNING_MODE}" == "developer-id" ]] && echo "true" || echo "false" )"
-            echo "signing_mode=${SIGNING_MODE}"
-            echo "should_notarize=${SHOULD_NOTARIZE}"
             echo "release_tag=${RELEASE_TAG}"
             echo "version=${VERSION}"
             echo "archive_name=${ARCHIVE_NAME}"
             echo "artifact_name=${ARTIFACT_NAME}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Check Rust & Swift Toolchains
+      - name: Verify Rust, Xcode 26 SDK & Swift Toolchains
         run: |
           set -euo pipefail
           if ! command -v cargo >/dev/null 2>&1; then
@@ -159,13 +122,22 @@ jobs:
             echo "$HOME/.cargo/bin" >> "${GITHUB_PATH}"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
+
           rustc --version
           cargo --version
-          swift --version
           xcode-select -p
+          xcodebuild -version
+          swift --version
+
+          SDK_VER="$(xcrun --show-sdk-version)"
+          SDK_MAJOR="${SDK_VER%%.*}"
+          echo "macOS SDK version: ${SDK_VER}"
+          if [[ ! "${SDK_MAJOR}" =~ ^[0-9]+$ ]] || [[ "${SDK_MAJOR}" -lt 26 ]]; then
+            echo "::error::macOS 26+ SDK is required to compile Liquid Glass UI (found ${SDK_VER})."
+            exit 1
+          fi
 
       - name: Provision Disposable PostgreSQL 16 for Tests
-        id: pg
         run: |
           set -euo pipefail
           if ! brew list postgresql@16 >/dev/null 2>&1; then
@@ -206,98 +178,35 @@ jobs:
             rm -rf "${PG_DATA}" "${RUNNER_TEMP}/ci_pgsock" "${RUNNER_TEMP}/ci_pg.log"
           fi
 
-      - name: Package Application (Signed & Notarized Release)
-        if: steps.mode.outputs.signing_mode == 'developer-id'
-        env:
-          APPLE_DEVELOPER_ID_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12 }}
-          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
-          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          KEYCHAIN_PATH="${RUNNER_TEMP}/lucidsql-signing.keychain-db"
-          KEYCHAIN_PW="$(openssl rand -base64 32)"
-          CERT_P12_PATH="${RUNNER_TEMP}/lucidsql-dev-id.p12"
-          NOTARY_P8_PATH="${RUNNER_TEMP}/lucidsql-notary.p8"
-
-          cleanup_secrets() {
-            security delete-keychain "${KEYCHAIN_PATH}" >/dev/null 2>&1 || true
-            rm -f "${KEYCHAIN_PATH}" "${CERT_P12_PATH}" "${NOTARY_P8_PATH}"
-          }
-          trap cleanup_secrets EXIT
-
-          printf '%s' "${APPLE_DEVELOPER_ID_CERT_P12}" | tr -d '\r\n' | base64 --decode > "${CERT_P12_PATH}"
-          printf '%s\n' "${APPLE_NOTARY_PRIVATE_KEY}" > "${NOTARY_P8_PATH}"
-          chmod 600 "${CERT_P12_PATH}" "${NOTARY_P8_PATH}"
-
-          security create-keychain -p "${KEYCHAIN_PW}" "${KEYCHAIN_PATH}"
-          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
-          security unlock-keychain -p "${KEYCHAIN_PW}" "${KEYCHAIN_PATH}"
-          security import "${CERT_P12_PATH}" -P "${APPLE_DEVELOPER_ID_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PW}" "${KEYCHAIN_PATH}"
-          security list-keychains -d user -s "${KEYCHAIN_PATH}" login.keychain-db
-
-          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION}" ]]; then
-            DETECTED_ID="$(security find-identity -v -p codesigning "${KEYCHAIN_PATH}" | awk -F'"' '/Developer ID Application:/ { print $2; exit }')"
-            if [[ -z "${DETECTED_ID}" ]]; then
-              echo "::error::Could not detect a Developer ID Application certificate in APPLE_DEVELOPER_ID_CERT_P12. Set APPLE_DEVELOPER_ID_APPLICATION explicitly."
-              exit 1
-            fi
-            export APPLE_DEVELOPER_ID_APPLICATION="${DETECTED_ID}"
-          fi
-
-          export APPLE_KEYCHAIN_PATH="${KEYCHAIN_PATH}"
-          export APPLE_NOTARY_PRIVATE_KEY_PATH="${NOTARY_P8_PATH}"
-
-          ./scripts/package-app.sh \
-            --skip-bridge-build \
-            --configuration release \
-            --signing-mode developer-id \
-            --notarize \
-            --zip \
-            --version "${{ steps.mode.outputs.version }}" \
-            --build-number "${GITHUB_RUN_NUMBER}" \
-            --archive-name "${{ steps.mode.outputs.archive_name }}" \
-            --output-dir "${RUNNER_TEMP}/dist"
-
-      - name: Package Application (Ad-Hoc Unsigned Development Artifact)
-        if: steps.mode.outputs.signing_mode == 'adhoc'
+      - name: Package Application DMG (Ad-Hoc Signed)
         run: |
           set -euo pipefail
           ./scripts/package-app.sh \
             --skip-bridge-build \
             --configuration release \
             --signing-mode adhoc \
-            --zip \
+            --dmg \
+            --require-liquid-glass \
             --version "${{ steps.mode.outputs.version }}" \
             --build-number "${GITHUB_RUN_NUMBER}" \
             --archive-name "${{ steps.mode.outputs.archive_name }}" \
             --output-dir "${RUNNER_TEMP}/dist"
 
-      - name: Verify Packaged ZIP Contents
+      - name: Verify Relocated DMG & Launch App
         run: |
           set -euo pipefail
-          ZIP_FILE="${RUNNER_TEMP}/dist/${{ steps.mode.outputs.archive_name }}.zip"
-          SHA_FILE="${ZIP_FILE}.sha256"
-          test -f "${ZIP_FILE}"
-          test -f "${SHA_FILE}"
-          (cd "${RUNNER_TEMP}/dist" && shasum -a 256 -c "$(basename "${SHA_FILE}")")
-          UNPACK_DIR="${RUNNER_TEMP}/verify_unpack"
-          rm -rf "${UNPACK_DIR}"
-          mkdir -p "${UNPACK_DIR}"
-          ditto -x -k "${ZIP_FILE}" "${UNPACK_DIR}"
-          codesign --verify --deep --strict "${UNPACK_DIR}/LucidSQL.app"
-          rm -rf "${UNPACK_DIR}"
+          ./scripts/verify-dmg.sh \
+            --require-liquid-glass \
+            --isolate-repo-build-dirs \
+            "${RUNNER_TEMP}/dist/${{ steps.mode.outputs.archive_name }}.dmg"
 
-      - name: Upload Packaged Build Artifact
+      - name: Upload DMG & Checksum Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.mode.outputs.artifact_name }}
           path: |
-            ${{ runner.temp }}/dist/${{ steps.mode.outputs.archive_name }}.zip
-            ${{ runner.temp }}/dist/${{ steps.mode.outputs.archive_name }}.zip.sha256
+            ${{ runner.temp }}/dist/${{ steps.mode.outputs.archive_name }}.dmg
+            ${{ runner.temp }}/dist/${{ steps.mode.outputs.archive_name }}.dmg.sha256
           retention-days: 30
           if-no-files-found: error
 
@@ -313,7 +222,7 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Download Packaged Artifact
+      - name: Download Packaged DMG Artifact
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build-and-test.outputs.artifact_name }}
@@ -323,42 +232,44 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum -c "${{ needs.build-and-test.outputs.archive_name }}.zip.sha256"
+          sha256sum -c "${{ needs.build-and-test.outputs.archive_name }}.dmg.sha256"
 
       - name: Generate Release Notes
         env:
           ARCHIVE_NAME: ${{ needs.build-and-test.outputs.archive_name }}
           VERSION: ${{ needs.build-and-test.outputs.version }}
-          IS_SIGNED: ${{ needs.build-and-test.outputs.is_signed_notarized }}
         run: |
           set -euo pipefail
-          SHA_VAL="$(awk '{print $1}' "dist/${ARCHIVE_NAME}.zip.sha256")"
-          if [[ "${IS_SIGNED}" == "true" ]]; then
-            SIGNING_NOTE="**Signing & Notarization:** Signed with Developer ID Application (Hardened Runtime) and notarized + stapled by Apple."
-          else
-            SIGNING_NOTE="> **Warning (Unsigned / Ad-Hoc Prerelease):** This prerelease build is ad-hoc signed and **not notarized** by Apple. macOS Gatekeeper will block opening downloaded binaries unless cleared manually."
-          fi
+          SHA_VAL="$(awk '{print $1}' "dist/${ARCHIVE_NAME}.dmg.sha256")"
 
           cat <<EOF > release_notes.md
           ## LucidSQL ${VERSION}
 
-          ${SIGNING_NOTE}
-
           ### System Requirements & Architecture
-          - **Supported macOS:** macOS 14.0 (Sonoma) or later
-          - **Architecture:** Apple Silicon (\`arm64\` only — not a Universal binary; Intel x86_64 is not included)
+          - **macOS:** macOS 14.0 (Sonoma) or later
+          - **Appearance:** Native Liquid Glass styling on macOS 26+ (compiled with macOS 26 SDK), with automatic fallback styling on macOS 14–15
+          - **Architecture:** Apple Silicon (\`arm64\` only — Intel x86_64 is not included)
+
+          ### Installation & Signing Notice (Ad-Hoc / Unnotarized)
+          LucidSQL is distributed as an **ad-hoc signed, unnotarized** macOS app bundle (no paid Apple Developer ID certificate). Because it is unnotarized, macOS Gatekeeper will warn on first launch after downloading.
+
+          To install and open LucidSQL:
+          1. Open \`${ARCHIVE_NAME}.dmg\` and drag **LucidSQL.app** to **Applications**.
+          2. Open **LucidSQL.app** once and dismiss the Gatekeeper prompt.
+          3. Open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to LucidSQL.
+          4. Click **Open** to confirm. (Do not globally disable Gatekeeper.)
 
           ### Downloads & Verification
-          - \`${ARCHIVE_NAME}.zip\`
-          - \`${ARCHIVE_NAME}.zip.sha256\` (\`${SHA_VAL}\`)
+          - \`${ARCHIVE_NAME}.dmg\`
+          - \`${ARCHIVE_NAME}.dmg.sha256\` (\`${SHA_VAL}\`)
 
           Verify integrity in Terminal:
           \`\`\`bash
-          shasum -a 256 -c ${ARCHIVE_NAME}.zip.sha256
+          shasum -a 256 -c ${ARCHIVE_NAME}.dmg.sha256
           \`\`\`
           EOF
 
-      - name: Create or Update GitHub Release
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build-and-test.outputs.release_tag }}
@@ -372,13 +283,13 @@ jobs:
           fi
 
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::error::GitHub Release ${RELEASE_TAG} already exists. Aborting to prevent overwriting an existing release."
+            echo "::error::GitHub Release ${RELEASE_TAG} already exists. Aborting to prevent duplicate release publication."
             exit 1
           fi
 
           gh release create "${RELEASE_TAG}" \
-            "dist/${ARCHIVE_NAME}.zip" \
-            "dist/${ARCHIVE_NAME}.zip.sha256" \
+            "dist/${ARCHIVE_NAME}.dmg" \
+            "dist/${ARCHIVE_NAME}.dmg.sha256" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "LucidSQL ${RELEASE_TAG}" \

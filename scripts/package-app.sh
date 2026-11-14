@@ -5,13 +5,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_DIR="${ROOT_DIR}/App"
 
+# shellcheck source=scripts/lib/bundle-verify.sh
+source "${SCRIPT_DIR}/lib/bundle-verify.sh"
+
 VERSION="0.1.0"
 BUILD_NUMBER="1"
 CONFIGURATION="debug"
 SIGNING_MODE="adhoc"
-NOTARIZE="false"
-CREATE_ZIP="false"
+CREATE_DMG="false"
 SKIP_BRIDGE_BUILD="false"
+REQUIRE_LIQUID_GLASS="false"
 OUTPUT_DIR="${APP_DIR}/.build"
 ARCHIVE_NAME=""
 
@@ -23,12 +26,12 @@ Options:
   --version <ver>            Marketing version (e.g. 0.1.0 or v0.1.0). Default: 0.1.0
   --build-number <num>       Bundle build number (CFBundleVersion). Default: 1
   --configuration <cfg>      Swift build configuration: debug | release. Default: debug
-  --signing-mode <mode>      Signing mode: adhoc | developer-id. Default: adhoc
-  --notarize                 Submit to Apple notary service, staple, and validate (requires developer-id)
-  --zip                      Create distributable .zip (with ditto) and .zip.sha256
-  --archive-name <name>      Base name for .zip output (without .zip)
-  --output-dir <path>        Directory for .app and .zip outputs. Default: App/.build
+  --signing-mode <mode>      Signing mode: adhoc (intended distribution mode). Default: adhoc
+  --dmg                      Create distributable .dmg (with Applications shortcut) and .dmg.sha256
+  --archive-name <name>      Base name for .dmg output (without .dmg)
+  --output-dir <path>        Directory for .app and .dmg outputs. Default: App/.build
   --skip-bridge-build        Reuse existing Core/target/release/liblucidsql_core.dylib and UniFFI bindings
+  --require-liquid-glass     Verify SDK >= 26 and compiled Liquid Glass symbols in LucidSQLApp
   -h, --help                 Show this help
 EOF
 }
@@ -51,12 +54,8 @@ while [[ $# -gt 0 ]]; do
             SIGNING_MODE="${2:-}"
             shift 2
             ;;
-        --notarize)
-            NOTARIZE="true"
-            shift
-            ;;
-        --zip)
-            CREATE_ZIP="true"
+        --dmg)
+            CREATE_DMG="true"
             shift
             ;;
         --archive-name)
@@ -69,6 +68,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-bridge-build)
             SKIP_BRIDGE_BUILD="true"
+            shift
+            ;;
+        --require-liquid-glass)
+            REQUIRE_LIQUID_GLASS="true"
             shift
             ;;
         -h|--help)
@@ -97,26 +100,34 @@ if [[ "${CONFIGURATION}" != "debug" && "${CONFIGURATION}" != "release" ]]; then
     exit 1
 fi
 
-if [[ "${SIGNING_MODE}" != "adhoc" && "${SIGNING_MODE}" != "developer-id" ]]; then
-    echo "Error: --signing-mode must be 'adhoc' or 'developer-id' (got '${SIGNING_MODE}')." >&2
-    exit 1
-fi
-
-if [[ "${NOTARIZE}" == "true" && "${SIGNING_MODE}" != "developer-id" ]]; then
-    echo "Error: --notarize requires --signing-mode developer-id." >&2
+if [[ "${SIGNING_MODE}" != "adhoc" ]]; then
+    echo "Error: Unsupported --signing-mode '${SIGNING_MODE}'. LucidSQL distributes ad-hoc-signed builds only ('adhoc')." >&2
     exit 1
 fi
 
 HOST_ARCH="$(uname -m)"
-if [[ -z "${ARCHIVE_NAME}" ]]; then
-    if [[ "${SIGNING_MODE}" == "developer-id" && "${NOTARIZE}" == "true" ]]; then
-        ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${HOST_ARCH}"
-    else
-        ARCHIVE_NAME="LucidSQL-${VERSION}-adhoc-unsigned-macos-${HOST_ARCH}"
+if [[ "${HOST_ARCH}" != "arm64" ]]; then
+    echo "Error: LucidSQL targets Apple Silicon (arm64) only; current host architecture is '${HOST_ARCH}'." >&2
+    exit 1
+fi
+
+SDK_VERSION="$(xcrun --show-sdk-version)"
+SDK_MAJOR="${SDK_VERSION%%.*}"
+echo "Active macOS SDK: ${SDK_VERSION} ($(xcrun --show-sdk-path))"
+echo "Active Swift: $(swift --version | head -n 1)"
+if [[ "${REQUIRE_LIQUID_GLASS}" == "true" ]]; then
+    if [[ ! "${SDK_MAJOR}" =~ ^[0-9]+$ ]] || [[ "${SDK_MAJOR}" -lt 26 ]]; then
+        echo "Error: --require-liquid-glass requires macOS 26+ SDK (found SDK '${SDK_VERSION}')." >&2
+        exit 1
     fi
 fi
 
+if [[ -z "${ARCHIVE_NAME}" ]]; then
+    ARCHIVE_NAME="LucidSQL-${VERSION}-macos-${HOST_ARCH}"
+fi
+
 mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd -P)"
 BUNDLE_DIR="${OUTPUT_DIR}/LucidSQL.app"
 
 if [[ "${SKIP_BRIDGE_BUILD}" != "true" ]]; then
@@ -148,13 +159,38 @@ mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
 mkdir -p "${BUNDLE_DIR}/Contents/Frameworks"
 mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
-cp -f "${BIN_PATH}" "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
-cp -f "${DYLIB_PATH}" "${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib"
-chmod +x "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
+BUNDLE_EXEC="${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
+BUNDLE_DYLIB="${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib"
 
-install_name_tool -id "@rpath/liblucidsql_core.dylib" "${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib" 2>/dev/null || true
-if ! otool -l "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp" | grep -q "@executable_path/../Frameworks"; then
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
+cp -f "${BIN_PATH}" "${BUNDLE_EXEC}"
+cp -f "${DYLIB_PATH}" "${BUNDLE_DYLIB}"
+chmod 755 "${BUNDLE_EXEC}" "${BUNDLE_DYLIB}"
+
+echo "=== 4. Rewriting Mach-O Install Names & RPATHs (Pre-Sign) ==="
+install_name_tool -id "@rpath/liblucidsql_core.dylib" "${BUNDLE_DYLIB}"
+
+# Rewrite any absolute/build-machine reference to liblucidsql_core.dylib in LucidSQLApp.
+while IFS= read -r dep; do
+    [[ -z "${dep}" ]] && continue
+    if [[ "${dep}" != "@rpath/liblucidsql_core.dylib" ]]; then
+        echo "Rewriting dependency in LucidSQLApp: ${dep} -> @rpath/liblucidsql_core.dylib"
+        install_name_tool -change "${dep}" "@rpath/liblucidsql_core.dylib" "${BUNDLE_EXEC}"
+    fi
+done < <(extract_macho_deps "${BUNDLE_EXEC}" | grep -E '(^|/)liblucidsql_core\.dylib$' || true)
+
+# Remove build-machine / toolchain / Homebrew rpaths from all bundled Mach-O binaries.
+while IFS= read -r macho; do
+    while IFS= read -r rp; do
+        [[ -z "${rp}" ]] && continue
+        if ! is_allowed_rpath "${rp}"; then
+            echo "Removing non-relocatable rpath from $(basename "${macho}"): ${rp}"
+            install_name_tool -delete_rpath "${rp}" "${macho}"
+        fi
+    done < <(extract_macho_rpaths "${macho}")
+done < <(find "${BUNDLE_DIR}" -type f | while IFS= read -r f; do file -b "${f}" | grep -q "Mach-O" && echo "${f}"; done)
+
+if ! extract_macho_rpaths "${BUNDLE_EXEC}" | grep -qx "@executable_path/../Frameworks"; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${BUNDLE_EXEC}"
 fi
 
 cat <<EOF > "${BUNDLE_DIR}/Contents/Info.plist"
@@ -162,6 +198,8 @@ cat <<EOF > "${BUNDLE_DIR}/Contents/Info.plist"
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDisplayName</key>
+    <string>LucidSQL</string>
     <key>CFBundleExecutable</key>
     <string>LucidSQLApp</string>
     <key>CFBundleIdentifier</key>
@@ -180,81 +218,75 @@ cat <<EOF > "${BUNDLE_DIR}/Contents/Info.plist"
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
 </dict>
 </plist>
 EOF
 
+echo "=== 5. Verifying Relocatable Mach-O Linkage & Styling ==="
+verify_bundle_macho "${BUNDLE_DIR}"
+if [[ "${REQUIRE_LIQUID_GLASS}" == "true" ]]; then
+    verify_liquid_glass_symbols "${BUNDLE_EXEC}"
+fi
+
 # Strip extended attributes before signing so Apple code sealing succeeds cleanly.
 xattr -cr "${BUNDLE_DIR}"
 
-echo "=== 4. Signing Application Bundle (${SIGNING_MODE}, inside-out) ==="
-if [[ "${SIGNING_MODE}" == "adhoc" ]]; then
-    codesign --force --sign - "${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib"
-    codesign --force --sign - "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
-    codesign --force --sign - "${BUNDLE_DIR}"
-    codesign --verify --deep --strict "${BUNDLE_DIR}"
-    echo "Signed ad-hoc (for local/development testing only; not notarized)."
-else
-    DEVELOPER_ID_IDENTITY="${APPLE_DEVELOPER_ID_APPLICATION:-}"
-    if [[ -z "${DEVELOPER_ID_IDENTITY}" ]]; then
-        echo "Error: APPLE_DEVELOPER_ID_APPLICATION must be set for developer-id signing." >&2
-        exit 1
-    fi
-    KEYCHAIN_ARGS=()
-    if [[ -n "${APPLE_KEYCHAIN_PATH:-}" ]]; then
-        KEYCHAIN_ARGS=(--keychain "${APPLE_KEYCHAIN_PATH}")
-    fi
+echo "=== 6. Ad-Hoc Signing Application Bundle (Inside-Out) ==="
+while IFS= read -r fw_macho; do
+    codesign --force --sign - "${fw_macho}"
+done < <(find "${BUNDLE_DIR}/Contents/Frameworks" -type f | sort | while IFS= read -r f; do file -b "${f}" | grep -q "Mach-O" && echo "${f}"; done)
 
-    codesign --force --options runtime --timestamp "${KEYCHAIN_ARGS[@]}" --sign "${DEVELOPER_ID_IDENTITY}" \
-        "${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib"
-    codesign --force --options runtime --timestamp "${KEYCHAIN_ARGS[@]}" --sign "${DEVELOPER_ID_IDENTITY}" \
-        "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp"
-    codesign --force --options runtime --timestamp "${KEYCHAIN_ARGS[@]}" --sign "${DEVELOPER_ID_IDENTITY}" \
-        "${BUNDLE_DIR}"
-    codesign --verify --deep --strict --verbose=2 "${BUNDLE_DIR}"
-fi
-
-if [[ "${NOTARIZE}" == "true" ]]; then
-    echo "=== 5. Submitting for Apple Notarization & Stapling ==="
-    if [[ -z "${APPLE_NOTARY_KEY_ID:-}" || -z "${APPLE_NOTARY_ISSUER_ID:-}" || -z "${APPLE_NOTARY_PRIVATE_KEY_PATH:-}" ]]; then
-        echo "Error: APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID, and APPLE_NOTARY_PRIVATE_KEY_PATH are required for notarization." >&2
-        exit 1
-    fi
-    if [[ ! -f "${APPLE_NOTARY_PRIVATE_KEY_PATH}" ]]; then
-        echo "Error: APPLE_NOTARY_PRIVATE_KEY_PATH file does not exist." >&2
-        exit 1
-    fi
-
-    NOTARY_SUBMIT_ZIP="${OUTPUT_DIR}/LucidSQL-notary-submit.zip"
-    rm -f "${NOTARY_SUBMIT_ZIP}"
-    ditto -c -k --keepParent "${BUNDLE_DIR}" "${NOTARY_SUBMIT_ZIP}"
-
-    xcrun notarytool submit "${NOTARY_SUBMIT_ZIP}" \
-        --key "${APPLE_NOTARY_PRIVATE_KEY_PATH}" \
-        --key-id "${APPLE_NOTARY_KEY_ID}" \
-        --issuer "${APPLE_NOTARY_ISSUER_ID}" \
-        --wait
-
-    rm -f "${NOTARY_SUBMIT_ZIP}"
-
-    xcrun stapler staple "${BUNDLE_DIR}"
-    xcrun stapler validate "${BUNDLE_DIR}"
-    spctl --assess --type execute --verbose=4 "${BUNDLE_DIR}"
-fi
+codesign --force --sign - "${BUNDLE_EXEC}"
+codesign --force --sign - "${BUNDLE_DIR}"
+codesign --verify --deep --strict --verbose=2 "${BUNDLE_DIR}"
+echo "Signed ad-hoc (not notarized; intended distribution mode)."
 
 echo "=== Application Bundle Ready ==="
 echo "Bundle path: ${BUNDLE_DIR}"
-echo "Binary architectures (LucidSQLApp): $(lipo -archs "${BUNDLE_DIR}/Contents/MacOS/LucidSQLApp")"
-echo "Bridge architectures (liblucidsql_core.dylib): $(lipo -archs "${BUNDLE_DIR}/Contents/Frameworks/liblucidsql_core.dylib")"
+echo "Binary architectures (LucidSQLApp): $(lipo -archs "${BUNDLE_EXEC}")"
+echo "Bridge architectures (liblucidsql_core.dylib): $(lipo -archs "${BUNDLE_DYLIB}")"
 
-if [[ "${CREATE_ZIP}" == "true" ]]; then
-    ZIP_PATH="${OUTPUT_DIR}/${ARCHIVE_NAME}.zip"
-    rm -f "${ZIP_PATH}" "${ZIP_PATH}.sha256"
-    ditto -c -k --keepParent "${BUNDLE_DIR}" "${ZIP_PATH}"
-    (cd "${OUTPUT_DIR}" && shasum -a 256 "${ARCHIVE_NAME}.zip" > "${ARCHIVE_NAME}.zip.sha256")
-    echo "ZIP archive: ${ZIP_PATH}"
-    echo "SHA-256 checksum: ${ZIP_PATH}.sha256"
-    cat "${ZIP_PATH}.sha256"
+if [[ "${CREATE_DMG}" == "true" ]]; then
+    echo "=== 7. Creating Versioned arm64 DMG & SHA-256 Checksum ==="
+    DMG_PATH="${OUTPUT_DIR}/${ARCHIVE_NAME}.dmg"
+    DMG_STAGING="${OUTPUT_DIR}/.dmg-staging-${ARCHIVE_NAME}"
+    rm -rf "${DMG_STAGING}" "${DMG_PATH}" "${DMG_PATH}.sha256"
+    mkdir -p "${DMG_STAGING}"
+
+    ditto "${BUNDLE_DIR}" "${DMG_STAGING}/LucidSQL.app"
+    ln -s /Applications "${DMG_STAGING}/Applications"
+
+    HDIUTIL_OK="false"
+    for attempt in 1 2 3; do
+        if hdiutil create \
+            -volname "LucidSQL" \
+            -srcfolder "${DMG_STAGING}" \
+            -ov \
+            -format UDZO \
+            -imagekey zlib-level=9 \
+            "${DMG_PATH}"; then
+            HDIUTIL_OK="true"
+            break
+        fi
+        echo "hdiutil create attempt ${attempt} failed; retrying..." >&2
+        rm -f "${DMG_PATH}"
+        sleep 2
+    done
+
+    rm -rf "${DMG_STAGING}"
+    if [[ "${HDIUTIL_OK}" != "true" ]]; then
+        echo "Error: Failed to create DMG at ${DMG_PATH}" >&2
+        exit 1
+    fi
+
+    hdiutil verify "${DMG_PATH}"
+    (cd "${OUTPUT_DIR}" && shasum -a 256 "${ARCHIVE_NAME}.dmg" > "${ARCHIVE_NAME}.dmg.sha256")
+    (cd "${OUTPUT_DIR}" && shasum -a 256 -c "${ARCHIVE_NAME}.dmg.sha256")
+    echo "DMG archive: ${DMG_PATH}"
+    echo "SHA-256 checksum: ${DMG_PATH}.sha256"
+    cat "${DMG_PATH}.sha256"
 fi

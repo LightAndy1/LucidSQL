@@ -9,6 +9,7 @@ FFI_DIR="$ROOT_DIR/App/Bridge/lucidsql_coreFFI"
 
 # Ensure PATH includes standard brew / cargo locations
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 
 mkdir -p "$OUT_DIR"
 mkdir -p "$FFI_DIR/include"
