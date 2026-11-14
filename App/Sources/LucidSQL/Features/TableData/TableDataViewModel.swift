@@ -4,13 +4,17 @@ import LucidSQLBridge
 
 @Observable
 public final class TableDataViewModel: @unchecked Sendable {
+    public static let pageSizePresets: [UInt32] = [25, 50, 100, 250, 500]
+    public static let defaultPageSize: UInt32 = 100
+    public static let pageSizeDefaultsKey = "LucidSQL.TableData.PageSize"
+
     public var currentSchema: String = "public"
     public var currentTable: String = ""
     public var columns: [ColumnMetadata] = []
     public var rows: [RowData] = []
     public private(set) var dataVersion: UInt64 = 0
     public var offset: UInt64 = 0
-    public var limit: UInt32 = 100
+    public var limit: UInt32 = TableDataViewModel.defaultPageSize
     public var hasMore: Bool = false
     public var executionDurationMs: UInt64 = 0
     public var isLoading: Bool = false
@@ -35,7 +39,19 @@ public final class TableDataViewModel: @unchecked Sendable {
     public var sortDescending: Bool = false
     public var exportViewModel: CsvExportViewModel? = nil
 
+    // Non-SQL table search state
+    public var isSearchBarVisible: Bool = false
+    public private(set) var searchFocusToken: UInt64 = 0
+    public var searchInputText: String = ""
+    public var searchSelectedColumn: String? = nil
+    public private(set) var appliedSearchQuery: String? = nil
+    public private(set) var appliedSearchColumn: String? = nil
+    public var searchDebounceNanoseconds: UInt64 = 280_000_000
+
+    private let userDefaults: UserDefaults
     private var activeLoadTask: Task<Void, Never>? = nil
+    private var searchDebounceTask: Task<Void, Never>? = nil
+    private var activeQueryId: String? = nil
     private var loadGeneration: UInt64 = 0
 
     public struct GridCoordinate: Hashable, Sendable {
@@ -112,7 +128,71 @@ public final class TableDataViewModel: @unchecked Sendable {
         public let summary: String
     }
 
-    public init() {}
+    public init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        let saved = userDefaults.integer(forKey: Self.pageSizeDefaultsKey)
+        if saved > 0, let preset = Self.pageSizePresets.first(where: { Int($0) == saved }) {
+            self.limit = preset
+        } else {
+            self.limit = Self.defaultPageSize
+        }
+    }
+
+    public var currentPage: UInt64 {
+        let perPage = max(UInt64(limit), 1)
+        return (offset / perPage) + 1
+    }
+
+    public var pageRangeStart: UInt64 {
+        rows.isEmpty ? 0 : offset + 1
+    }
+
+    public var pageRangeEnd: UInt64 {
+        rows.isEmpty ? 0 : offset + UInt64(rows.count)
+    }
+
+    public var isOutOfRangeEmptyPage: Bool {
+        offset > 0 && rows.isEmpty && !isLoading && errorMessage == nil
+    }
+
+    /// Total matching/table rows only when known cleanly without running `COUNT(*)`.
+    public var knownTotalRows: UInt64? {
+        guard !hasMore else { return nil }
+        if offset > 0 && rows.isEmpty {
+            return nil
+        }
+        return offset + UInt64(rows.count)
+    }
+
+    public var knownTotalPages: UInt64? {
+        guard let total = knownTotalRows, total > 0 else { return nil }
+        let perPage = max(UInt64(limit), 1)
+        return ((total - 1) / perPage) + 1
+    }
+
+    public var isSearchActive: Bool {
+        appliedSearchQuery != nil
+    }
+
+    public func isColumnSearchable(_ column: ColumnMetadata) -> Bool {
+        is_pg_type_searchable(pgTypeName: column.pgTypeName)
+    }
+
+    public var searchableColumns: [ColumnMetadata] {
+        columns.filter { isColumnSearchable($0) }
+    }
+
+    public var nonSearchableColumns: [ColumnMetadata] {
+        columns.filter { !isColumnSearchable($0) }
+    }
+
+    public var hasSearchableColumns: Bool {
+        !searchableColumns.isEmpty
+    }
+
+    public static func normalizedSearchQuery(_ text: String) -> String? {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+    }
 
     public var hasPrimaryKey: Bool {
         columns.contains { $0.isPrimaryKey }
@@ -402,17 +482,31 @@ public final class TableDataViewModel: @unchecked Sendable {
         return issues
     }
 
+    private func cancelInFlightServerQuery() {
+        guard let priorQueryId = activeQueryId else { return }
+        activeQueryId = nil
+        Task.detached {
+            _ = try? await cancel_query(queryId: priorQueryId)
+        }
+    }
+
     public func cancelActiveLoad() {
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
         activeLoadTask?.cancel()
         activeLoadTask = nil
+        cancelInFlightServerQuery()
         loadGeneration &+= 1
         isLoading = false
     }
 
     @discardableResult
     public func beginTableNavigation(schema: String, table: String) -> UInt64 {
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
         activeLoadTask?.cancel()
         activeLoadTask = nil
+        cancelInFlightServerQuery()
         loadGeneration &+= 1
 
         let switchingTables = self.currentSchema != schema || self.currentTable != table
@@ -421,6 +515,11 @@ public final class TableDataViewModel: @unchecked Sendable {
         self.offset = 0
         self.sortColumn = nil
         self.sortDescending = false
+        self.isSearchBarVisible = false
+        self.searchInputText = ""
+        self.searchSelectedColumn = nil
+        self.appliedSearchQuery = nil
+        self.appliedSearchColumn = nil
         self.clearStagedChanges()
         self.statusMessage = nil
         self.errorMessage = nil
@@ -433,6 +532,22 @@ public final class TableDataViewModel: @unchecked Sendable {
         }
         self.isLoading = true
         return self.loadGeneration
+    }
+
+    private func startPageFetch(config: ConnectionConfig, refreshColumns: Bool = false) {
+        guard !currentTable.isEmpty else {
+            isLoading = false
+            return
+        }
+        activeLoadTask?.cancel()
+        cancelInFlightServerQuery()
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        isLoading = true
+        errorMessage = nil
+        activeLoadTask = Task { @MainActor [weak self] in
+            await self?.fetchPage(config: config, refreshColumns: refreshColumns, generation: generation)
+        }
     }
 
     public func startTableLoad(config: ConnectionConfig, schema: String, table: String) {
@@ -460,6 +575,7 @@ public final class TableDataViewModel: @unchecked Sendable {
         } else {
             activeLoadTask?.cancel()
             activeLoadTask = nil
+            cancelInFlightServerQuery()
             loadGeneration &+= 1
             requestGen = loadGeneration
         }
@@ -467,11 +583,17 @@ public final class TableDataViewModel: @unchecked Sendable {
         let targetSchema = currentSchema
         let targetTable = currentTable
         let targetOffset = offset
+        let targetLimit = limit
         let targetSortCol = sortColumn
         let targetSortDesc = sortDescending
+        let targetSearchQuery = appliedSearchQuery
+        let targetSearchCol = appliedSearchColumn
         let needsColumns = refreshColumns || columns.isEmpty
         let knownHasPK: Bool? = needsColumns ? nil : hasPrimaryKey
+        let queryId = UUID().uuidString
 
+        cancelInFlightServerQuery()
+        self.activeQueryId = queryId
         self.isLoading = true
         self.errorMessage = nil
 
@@ -481,16 +603,27 @@ public final class TableDataViewModel: @unchecked Sendable {
                 schema: targetSchema,
                 table: targetTable,
                 offset: targetOffset,
-                limit: limit,
+                limit: targetLimit,
                 sortCol: targetSortCol,
                 sortDesc: targetSortDesc,
-                knownHasPrimaryKey: knownHasPK
+                knownHasPrimaryKey: knownHasPK,
+                searchQuery: targetSearchQuery,
+                searchColumn: targetSearchCol,
+                queryId: queryId
             )
+
+            if self.activeQueryId == queryId {
+                self.activeQueryId = nil
+            }
 
             guard !Task.isCancelled,
                   requestGen == self.loadGeneration,
                   self.currentSchema == targetSchema,
-                  self.currentTable == targetTable else {
+                  self.currentTable == targetTable,
+                  self.offset == targetOffset,
+                  self.limit == targetLimit,
+                  self.appliedSearchQuery == targetSearchQuery,
+                  self.appliedSearchColumn == targetSearchCol else {
                 return
             }
 
@@ -503,11 +636,17 @@ public final class TableDataViewModel: @unchecked Sendable {
             self.dataVersion &+= 1
             self.isLoading = false
         } catch is CancellationError {
+            if self.activeQueryId == queryId {
+                self.activeQueryId = nil
+            }
             if requestGen == self.loadGeneration {
                 self.isLoading = false
             }
             return
         } catch {
+            if self.activeQueryId == queryId {
+                self.activeQueryId = nil
+            }
             guard !Task.isCancelled,
                   requestGen == self.loadGeneration,
                   self.currentSchema == targetSchema,
@@ -540,6 +679,8 @@ public final class TableDataViewModel: @unchecked Sendable {
                 hasPrimaryKey: hasPrimaryKey,
                 sortCol: sortColumn,
                 sortDesc: sortDescending,
+                searchQuery: appliedSearchQuery,
+                searchColumn: appliedSearchColumn,
                 pendingChangesCount: totalStagedOperationsCount,
                 stagedSummary: stagedSummaryText
             ),
@@ -549,49 +690,230 @@ public final class TableDataViewModel: @unchecked Sendable {
         return vm
     }
 
-    public func nextPage(config: ConnectionConfig) {
-        guard hasMore else { return }
+    // MARK: - Search Controls
+
+    public func openSearchBar() {
+        guard !currentTable.isEmpty else { return }
+        if !isSearchBarVisible {
+            searchInputText = appliedSearchQuery ?? ""
+            searchSelectedColumn = appliedSearchColumn
+            isSearchBarVisible = true
+        }
+        searchFocusToken &+= 1
+    }
+
+    public func dismissSearchBar(config: ConnectionConfig?) {
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
+        if appliedSearchQuery == nil {
+            isSearchBarVisible = false
+            searchInputText = ""
+            searchSelectedColumn = nil
+            return
+        }
+        guard let config else {
+            isSearchBarVisible = false
+            searchInputText = ""
+            searchSelectedColumn = nil
+            appliedSearchQuery = nil
+            appliedSearchColumn = nil
+            offset = 0
+            return
+        }
         safeNavigate { [weak self] in
             guard let self = self else { return }
-            self.activeLoadTask?.cancel()
-            self.loadGeneration &+= 1
-            let generation = self.loadGeneration
-            self.offset += UInt64(self.limit)
-            self.isLoading = true
-            self.errorMessage = nil
-            self.activeLoadTask = Task { @MainActor [weak self] in
-                await self?.fetchPage(config: config, refreshColumns: false, generation: generation)
+            self.isSearchBarVisible = false
+            self.searchInputText = ""
+            self.searchSelectedColumn = nil
+            self.appliedSearchQuery = nil
+            self.appliedSearchColumn = nil
+            self.offset = 0
+            self.startPageFetch(config: config, refreshColumns: false)
+        }
+    }
+
+    public func updateSearchInput(_ newValue: String, config: ConnectionConfig) {
+        searchInputText = newValue
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
+
+        guard hasSearchableColumns else { return }
+
+        let nextQuery = Self.normalizedSearchQuery(newValue)
+        if nextQuery == appliedSearchQuery && searchSelectedColumn == appliedSearchColumn {
+            return
+        }
+
+        let debounceNs = searchDebounceNanoseconds
+        searchDebounceTask = Task { @MainActor [weak self] in
+            if debounceNs > 0 {
+                try? await Task.sleep(nanoseconds: debounceNs)
             }
+            guard !Task.isCancelled, let self = self else { return }
+            self.applyPendingSearch(config: config)
+        }
+    }
+
+    public func updateSearchColumn(_ newColumn: String?, config: ConnectionConfig) {
+        if let colName = newColumn,
+           let colMeta = columns.first(where: { $0.name == colName }),
+           !isColumnSearchable(colMeta) {
+            return
+        }
+        searchSelectedColumn = newColumn
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
+
+        let nextQuery = Self.normalizedSearchQuery(searchInputText)
+        guard nextQuery != nil || appliedSearchQuery != nil else {
+            return
+        }
+        if nextQuery == appliedSearchQuery && searchSelectedColumn == appliedSearchColumn {
+            return
+        }
+        applyPendingSearch(config: config)
+    }
+
+    public func submitSearchNow(config: ConnectionConfig) {
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
+        guard hasSearchableColumns else { return }
+        applyPendingSearch(config: config)
+    }
+
+    public func clearSearch(config: ConnectionConfig) {
+        searchDebounceTask?.cancel()
+        searchDebounceTask = nil
+
+        if appliedSearchQuery == nil && appliedSearchColumn == nil {
+            searchInputText = ""
+            searchSelectedColumn = nil
+            return
+        }
+
+        safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.searchInputText = ""
+            self.searchSelectedColumn = nil
+            self.appliedSearchQuery = nil
+            self.appliedSearchColumn = nil
+            self.offset = 0
+            self.startPageFetch(config: config, refreshColumns: false)
+        }
+    }
+
+    private func applyPendingSearch(config: ConnectionConfig) {
+        let nextQuery = Self.normalizedSearchQuery(searchInputText)
+        let nextColumn = searchSelectedColumn
+        if nextQuery == appliedSearchQuery && nextColumn == appliedSearchColumn {
+            return
+        }
+
+        safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.appliedSearchQuery = nextQuery
+            self.appliedSearchColumn = nextColumn
+            self.offset = 0
+            self.startPageFetch(config: config, refreshColumns: false)
+        }
+    }
+
+    // MARK: - Pagination Controls
+
+    public enum PageInputValidation: Equatable, Sendable {
+        case valid(UInt64)
+        case invalid(String)
+    }
+
+    public func validatePageInput(_ raw: String) -> PageInputValidation {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .invalid("Enter a page number.")
+        }
+        if trimmed.allSatisfy(\.isNumber) {
+            guard let page = UInt64(trimmed), page >= 1 else {
+                return UInt64(trimmed) == 0
+                    ? .invalid("Enter a whole page number of 1 or greater.")
+                    : .invalid("Page number is too large.")
+            }
+            let perPage = max(UInt64(limit), 1)
+            let (targetOffset, overflow) = (page - 1).multipliedReportingOverflow(by: perPage)
+            guard !overflow, targetOffset <= UInt64(Int64.max) else {
+                return .invalid("Page number is too large.")
+            }
+            return .valid(page)
+        }
+        return .invalid("Enter a whole page number of 1 or greater.")
+    }
+
+    public func setPageSize(_ newSize: UInt32, config: ConnectionConfig) {
+        guard Self.pageSizePresets.contains(newSize) else { return }
+        if newSize == limit && offset == 0 {
+            return
+        }
+        if currentTable.isEmpty {
+            self.limit = newSize
+            self.userDefaults.set(Int(newSize), forKey: Self.pageSizeDefaultsKey)
+            self.offset = 0
+            return
+        }
+        safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.limit = newSize
+            self.userDefaults.set(Int(newSize), forKey: Self.pageSizeDefaultsKey)
+            self.offset = 0
+            self.startPageFetch(config: config, refreshColumns: false)
+        }
+    }
+
+    @discardableResult
+    public func goToPage(_ page: UInt64, config: ConnectionConfig) -> Bool {
+        guard page >= 1 else { return false }
+        let perPage = max(UInt64(limit), 1)
+        let (targetOffset, overflow) = (page - 1).multipliedReportingOverflow(by: perPage)
+        guard !overflow, targetOffset <= UInt64(Int64.max) else { return false }
+        if targetOffset == offset && errorMessage == nil {
+            return true
+        }
+        safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.offset = targetOffset
+            self.startPageFetch(config: config, refreshColumns: false)
+        }
+        return true
+    }
+
+    public func goToFirstPage(config: ConnectionConfig) {
+        _ = goToPage(1, config: config)
+    }
+
+    public func nextPage(config: ConnectionConfig) {
+        guard hasMore else { return }
+        let perPage = max(UInt64(limit), 1)
+        let (nextOffset, overflow) = offset.addingReportingOverflow(perPage)
+        guard !overflow, nextOffset <= UInt64(Int64.max) else { return }
+        safeNavigate { [weak self] in
+            guard let self = self else { return }
+            self.offset = nextOffset
+            self.startPageFetch(config: config, refreshColumns: false)
         }
     }
 
     public func previousPage(config: ConnectionConfig) {
-        guard offset >= UInt64(limit) else { return }
+        guard offset > 0 else { return }
+        let perPage = max(UInt64(limit), 1)
+        let prevOffset = offset >= perPage ? offset - perPage : 0
         safeNavigate { [weak self] in
             guard let self = self else { return }
-            self.activeLoadTask?.cancel()
-            self.loadGeneration &+= 1
-            let generation = self.loadGeneration
-            self.offset -= UInt64(self.limit)
-            self.isLoading = true
-            self.errorMessage = nil
-            self.activeLoadTask = Task { @MainActor [weak self] in
-                await self?.fetchPage(config: config, refreshColumns: false, generation: generation)
-            }
+            self.offset = prevOffset
+            self.startPageFetch(config: config, refreshColumns: false)
         }
     }
 
     public func reloadTable(config: ConnectionConfig) {
         safeNavigate { [weak self] in
             guard let self = self else { return }
-            self.activeLoadTask?.cancel()
-            self.loadGeneration &+= 1
-            let generation = self.loadGeneration
-            self.isLoading = true
-            self.errorMessage = nil
-            self.activeLoadTask = Task { @MainActor [weak self] in
-                await self?.fetchPage(config: config, refreshColumns: true, generation: generation)
-            }
+            self.startPageFetch(config: config, refreshColumns: true)
         }
     }
 
@@ -643,6 +965,9 @@ public final class TableDataViewModel: @unchecked Sendable {
     public func cancelNavigation() {
         showingUnsavedChangesAlert = false
         pendingNavigationAction = nil
+        // Restore pending search controls to match what is currently applied
+        searchInputText = appliedSearchQuery ?? ""
+        searchSelectedColumn = appliedSearchColumn
     }
 
     @discardableResult
@@ -976,10 +1301,12 @@ public final class TableDataViewModel: @unchecked Sendable {
             self.isApplying = false
             self.showingReviewSheet = false
 
-            if rows.isEmpty && offset >= UInt64(limit) {
-                offset -= UInt64(limit)
-            }
             await fetchPage(config: config)
+            if errorMessage == nil && rows.isEmpty && offset > 0 {
+                let perPage = max(UInt64(limit), 1)
+                offset = offset >= perPage ? offset - perPage : 0
+                await fetchPage(config: config)
+            }
         } catch let error as LucidError {
             self.isApplying = false
             if case .UncertainCommitOutcome = error {

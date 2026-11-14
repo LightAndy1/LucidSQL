@@ -1,7 +1,111 @@
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex};
+
+use crate::connection::ConnectionConfig;
 use crate::error::LucidError;
 use crate::query::execute::map_postgres_error;
 use super::{ColumnMetadata, TableInfo};
 use deadpool_postgres::GenericClient;
+
+const MAX_CACHED_TABLE_COLUMNS: usize = 256;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ColumnCacheKey {
+    host: String,
+    port: u16,
+    database: String,
+    user: String,
+    ssl_mode: String,
+    schema: String,
+    table: String,
+}
+
+impl ColumnCacheKey {
+    fn new(config: &ConnectionConfig, schema: &str, table: &str) -> Self {
+        Self {
+            host: config.host.clone(),
+            port: config.port,
+            database: config.database.clone(),
+            user: config.user.clone(),
+            ssl_mode: config.ssl_mode.clone(),
+            schema: schema.to_string(),
+            table: table.to_string(),
+        }
+    }
+}
+
+struct ColumnMetadataCache {
+    entries: HashMap<ColumnCacheKey, Vec<ColumnMetadata>>,
+    order: VecDeque<ColumnCacheKey>,
+}
+
+impl ColumnMetadataCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &ColumnCacheKey) -> Option<Vec<ColumnMetadata>> {
+        let found = self.entries.get(key).cloned();
+        if found.is_some() {
+            self.order.retain(|k| k != key);
+            self.order.push_back(key.clone());
+        }
+        found
+    }
+
+    fn insert(&mut self, key: ColumnCacheKey, cols: Vec<ColumnMetadata>) {
+        self.order.retain(|k| k != &key);
+        while self.entries.len() >= MAX_CACHED_TABLE_COLUMNS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, cols);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+static COLUMN_METADATA_CACHE: LazyLock<Mutex<ColumnMetadataCache>> =
+    LazyLock::new(|| Mutex::new(ColumnMetadataCache::new()));
+
+pub fn clear_column_metadata_cache() {
+    if let Ok(mut cache) = COLUMN_METADATA_CACHE.lock() {
+        cache.clear();
+    }
+}
+
+pub async fn query_columns_cached<C: GenericClient>(
+    client: &C,
+    config: &ConnectionConfig,
+    schema: &str,
+    table: &str,
+    force_refresh: bool,
+) -> Result<Vec<ColumnMetadata>, LucidError> {
+    let key = ColumnCacheKey::new(config, schema, table);
+    if !force_refresh {
+        if let Ok(mut cache) = COLUMN_METADATA_CACHE.lock() {
+            if let Some(cols) = cache.get(&key) {
+                return Ok(cols);
+            }
+        }
+    }
+
+    let cols = query_columns(client, schema, table).await?;
+    if let Ok(mut cache) = COLUMN_METADATA_CACHE.lock() {
+        cache.insert(key, cols.clone());
+    }
+    Ok(cols)
+}
 
 pub async fn query_schemas<C: GenericClient>(client: &C) -> Result<Vec<String>, LucidError> {
     let sql = r#"

@@ -421,4 +421,76 @@ struct CsvExportTests {
             queryId: UUID().uuidString
         )
     }
+
+    @MainActor
+    func testFilteredTableSearchCsvExportScopeAndContent() async throws {
+        let config = getLocalConfig()
+        let dir = try makeTempDir()
+        let schemaName = "lucidsql_swift_expsearch_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+
+        defer {
+            Task {
+                _ = try? await execute_query(
+                    config: config,
+                    sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+                    queryId: UUID().uuidString
+                )
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        _ = try await execute_query(
+            config: config,
+            sql: """
+            CREATE SCHEMA "\(schemaName)";
+            CREATE TABLE "\(schemaName)".orders (
+                id INT PRIMARY KEY,
+                customer TEXT NOT NULL
+            );
+            INSERT INTO "\(schemaName)".orders (id, customer)
+            SELECT g,
+                   CASE WHEN g % 30 = 0 THEN 'special_100%_🚀_' || g ELSE 'regular_' || g END
+            FROM generate_series(1, 300) AS g;
+            """,
+            queryId: UUID().uuidString
+        )
+
+        let vm = TableDataViewModel()
+        await vm.loadTable(config: config, schema: schemaName, table: "orders")
+        vm.openSearchBar()
+        vm.searchInputText = "special_100%_🚀_"
+        vm.submitSearchNow(config: config)
+        for _ in 0..<40 {
+            if !vm.isLoading && vm.isSearchActive { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        #expect(vm.rows.count == 10) // 30, 60, ..., 300 across original 3 pages
+
+        let exportVM = vm.prepareCsvExport(config: config, initialScope: .allRows)!
+        #expect(exportVM.hasActiveSearchFilter == true)
+        #expect(exportVM.fullTableScopeLabel == "All Matching Rows in Table")
+        #expect(exportVM.suggestedFileName.contains("_filtered"))
+
+        let dest = dir.appendingPathComponent("filtered_orders.csv")
+        exportVM.startExport(to: dest)
+        for _ in 0..<80 {
+            if !exportVM.isExporting { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        #expect(exportVM.isExporting == false)
+        #expect(exportVM.errorMessage == nil)
+        #expect(exportVM.lastResult?.rowsExported == 10)
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        let lines = content.split(separator: "\n")
+        #expect(lines.count == 11) // header + 10 matching rows including 270, 300 beyond page 1
+        #expect(content.contains("300,special_100%_🚀_300"))
+
+        _ = try? await execute_query(
+            config: config,
+            sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+            queryId: UUID().uuidString
+        )
+    }
 }

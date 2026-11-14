@@ -856,4 +856,398 @@ struct TableDataViewModelTests {
         vm.cancelActiveLoad()
         #expect(vm.isLoading == false)
     }
+
+    @Test("Non-SQL table search covers multi-page fixtures, literal wildcards, Unicode, NULL vs 'NULL', column scope, and clear")
+    @MainActor
+    func testSearchTableMultiPageLiteralsUnicodeNullAndColumns() async throws {
+        let config = getLocalConfig()
+        let suiteName = "LucidSQLTest.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let schemaName = "lucidsql_search_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        defer {
+            Task {
+                _ = try? await execute_query(
+                    config: config,
+                    sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+                    queryId: UUID().uuidString
+                )
+            }
+        }
+
+        _ = try await execute_query(
+            config: config,
+            sql: """
+            CREATE SCHEMA "\(schemaName)";
+            CREATE TABLE "\(schemaName)".catalog_items (
+                id INT PRIMARY KEY,
+                title TEXT NOT NULL,
+                note TEXT,
+                payload BYTEA,
+                meta JSONB,
+                tags TEXT[]
+            );
+            INSERT INTO "\(schemaName)".catalog_items (id, title, note, payload, meta, tags)
+            SELECT g,
+                   CASE
+                       WHEN g = 15 THEN 'row_alpha_only'
+                       WHEN g = 260 THEN '100% discount special'
+                       WHEN g = 261 THEN '1000 discount normal'
+                       WHEN g = 262 THEN 'item_1 exact'
+                       WHEN g = 263 THEN 'itemX1 different'
+                       WHEN g = 264 THEN 'back\\slash quote''dbl"quote'
+                       WHEN g = 265 THEN 'Café 🚀 東京 item'
+                       WHEN g = 266 THEN 'null-literal-row'
+                       WHEN g = 267 THEN 'true-sql-null-row'
+                       ELSE 'filler_' || g
+                   END,
+                   CASE
+                       WHEN g = 18 THEN 'note has alpha inside'
+                       WHEN g = 266 THEN 'NULL'
+                       WHEN g = 267 THEN NULL
+                       ELSE 'note_' || g
+                   END,
+                   '\\xDEADBEEF'::bytea,
+                   '{"secret_token":"skip_jsonb_search"}'::jsonb,
+                   ARRAY['skip_array']::text[]
+            FROM generate_series(1, 320) AS g;
+            """,
+            queryId: UUID().uuidString
+        )
+
+        let vm = TableDataViewModel(userDefaults: defaults)
+        await vm.loadTable(config: config, schema: schemaName, table: "catalog_items")
+
+        #expect(vm.rows.count == 100)
+        #expect(vm.hasMore == true)
+        #expect(vm.knownTotalRows == nil) // Never runs speculative COUNT(*)
+
+        // Explicit searchable vs non-searchable types
+        let searchableNames = Set(vm.searchableColumns.map(\.name))
+        let nonSearchableNames = Set(vm.nonSearchableColumns.map(\.name))
+        #expect(searchableNames.contains("id"))
+        #expect(searchableNames.contains("title"))
+        #expect(searchableNames.contains("note"))
+        #expect(nonSearchableNames == Set(["payload", "meta", "tags"]))
+
+        // Non-searchable columns (bytea/jsonb/array) must NOT match searches
+        vm.openSearchBar()
+        #expect(vm.isSearchBarVisible == true)
+        vm.searchInputText = "skip_jsonb_search"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.isSearchActive == true)
+        #expect(vm.rows.isEmpty == true)
+        #expect(vm.knownTotalRows == 0)
+
+        // Match outside page 1 + literal '%' escaping (100% matches id=260, NOT id=261 '1000')
+        vm.searchInputText = "100% DISCOUNT"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[1] == .integer(260))
+        #expect(vm.knownTotalRows == 1)
+        #expect(vm.knownTotalPages == 1)
+
+        // Literal '_' escaping (item_1 matches id=262, NOT id=263 'itemX1')
+        vm.searchInputText = "item_1"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[1] == .integer(262))
+
+        // Backslash and quotes
+        vm.searchInputText = "back\\slash quote'dbl\"quote"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[1] == .integer(264))
+
+        // Unicode (beyond page 1)
+        vm.searchInputText = "Café 🚀 東京"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[1] == .integer(265))
+
+        // Literal "NULL" text matches id=266 (text 'NULL'), NOT id=267 (SQL NULL)
+        vm.searchInputText = "NULL"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 2) // id=266 note='NULL' and id=267 title='true-sql-null-row'
+        vm.updateSearchColumn("note", config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[1] == .integer(266))
+
+        // Column scope: 'All searchable columns' vs specific column
+        vm.updateSearchColumn(nil, config: config)
+        vm.searchInputText = "alpha"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.map { $0.cells[1] } == [.integer(15), .integer(18)])
+
+        vm.updateSearchColumn("title", config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.map { $0.cells[1] } == [.integer(15)])
+
+        // Clear restores normal unfiltered browsing on page 1
+        vm.clearSearch(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.isSearchActive == false)
+        #expect(vm.appliedSearchQuery == nil)
+        #expect(vm.appliedSearchColumn == nil)
+        #expect(vm.offset == 0)
+        #expect(vm.rows.count == 100)
+        #expect(vm.rows.first?.cells[1] == .integer(1))
+
+        // Escape dismiss with no active search hides bar immediately
+        vm.dismissSearchBar(config: config)
+        #expect(vm.isSearchBarVisible == false)
+
+        _ = try? await execute_query(
+            config: config,
+            sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+            queryId: UUID().uuidString
+        )
+    }
+
+    @Test("Pagination presets persist, page jumps validate input, tie-breakers prevent duplicates, and no-PK tables degrade honestly")
+    @MainActor
+    func testPaginationPresetsPersistenceJumpsValidationAndNoPK() async throws {
+        let config = getLocalConfig()
+        let suiteName = "LucidSQLTest.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let schemaName = "lucidsql_page_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        defer {
+            Task {
+                _ = try? await execute_query(
+                    config: config,
+                    sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+                    queryId: UUID().uuidString
+                )
+            }
+        }
+
+        _ = try await execute_query(
+            config: config,
+            sql: """
+            CREATE SCHEMA "\(schemaName)";
+            CREATE TABLE "\(schemaName)".tied_items (
+                id INT PRIMARY KEY,
+                grp TEXT NOT NULL,
+                label TEXT NOT NULL
+            );
+            INSERT INTO "\(schemaName)".tied_items (id, grp, label)
+            SELECT g, 'same_group', CASE WHEN g <= 60 THEN 'match_tag_' || g ELSE 'other_' || g END
+            FROM generate_series(1, 140) AS g;
+
+            CREATE TABLE "\(schemaName)".heap_only (
+                tag TEXT NOT NULL
+            );
+            INSERT INTO "\(schemaName)".heap_only (tag)
+            SELECT 'heap_' || g FROM generate_series(1, 60) AS g;
+            """,
+            queryId: UUID().uuidString
+        )
+
+        let vm = TableDataViewModel(userDefaults: defaults)
+        #expect(vm.limit == 100)
+        await vm.loadTable(config: config, schema: schemaName, table: "tied_items")
+
+        // Page-size validation helpers
+        #expect(vm.validatePageInput("") == .invalid("Enter a page number."))
+        #expect(vm.validatePageInput("0") == .invalid("Enter a whole page number of 1 or greater."))
+        #expect(vm.validatePageInput("-4") == .invalid("Enter a whole page number of 1 or greater."))
+        #expect(vm.validatePageInput("abc") == .invalid("Enter a whole page number of 1 or greater."))
+        #expect(vm.validatePageInput("99999999999999999999") == .invalid("Page number is too large."))
+        #expect(vm.validatePageInput("2") == .valid(2))
+
+        // Sort on completely tied column ('grp') + change page size to 25 -> persisted & resets offset to 0
+        vm.sortColumn = "grp"
+        vm.sortDescending = false
+        vm.setPageSize(25, config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.limit == 25)
+        #expect(vm.offset == 0)
+        #expect(vm.rows.count == 25)
+        #expect(vm.hasMore == true)
+
+        // New VM reads persisted limit = 25
+        let reloadedVm = TableDataViewModel(userDefaults: defaults)
+        #expect(reloadedVm.limit == 25)
+
+        // Search + jump to page 2 preserves search & deterministic PK tie-breaker ordering (no overlap across pages)
+        vm.openSearchBar()
+        vm.searchInputText = "match_tag_"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        let page1Ids = vm.rows.map { $0.cells[1] }
+        #expect(page1Ids.count == 25)
+        #expect(vm.knownTotalRows == nil) // page 1 of 60 matches -> hasMore is true
+
+        #expect(vm.goToPage(2, config: config) == true)
+        try await waitUntilIdle(vm)
+        let page2Ids = vm.rows.map { $0.cells[1] }
+        #expect(page2Ids.count == 25)
+        #expect(Set(page1Ids).isDisjoint(with: Set(page2Ids)))
+
+        // Jump to final page 3 -> !hasMore -> knownTotalRows & knownTotalPages become accurate (60 & 3)
+        #expect(vm.goToPage(3, config: config) == true)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 10)
+        #expect(vm.hasMore == false)
+        #expect(vm.knownTotalRows == 60)
+        #expect(vm.knownTotalPages == 3)
+
+        // Out-of-range page handled gracefully (never invents total, offers goToFirstPage)
+        #expect(vm.goToPage(99, config: config) == true)
+        try await waitUntilIdle(vm)
+        #expect(vm.isOutOfRangeEmptyPage == true)
+        #expect(vm.knownTotalRows == nil)
+        vm.goToFirstPage(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.currentPage == 1)
+        #expect(vm.rows.count == 25)
+
+        // No-PK table allows search & paging while clearly flagging !hasPrimaryKey
+        await vm.loadTable(config: config, schema: schemaName, table: "heap_only")
+        #expect(vm.hasPrimaryKey == false)
+        #expect(vm.rows.count == 25)
+        vm.searchInputText = "heap_5"
+        vm.submitSearchNow(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 11) // 5, 50..59
+
+        _ = try? await execute_query(
+            config: config,
+            sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+            queryId: UUID().uuidString
+        )
+    }
+
+    @Test("Rapid search debounce supersedes prior queries, protects pending edits, and search->page->edit/apply refreshes cleanly")
+    @MainActor
+    func testSearchDebounceSupersedePendingEditsAndApplyRefresh() async throws {
+        let config = getLocalConfig()
+        let suiteName = "LucidSQLTest.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let schemaName = "lucidsql_editsearch_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        defer {
+            Task {
+                _ = try? await execute_query(
+                    config: config,
+                    sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+                    queryId: UUID().uuidString
+                )
+            }
+        }
+
+        // 80 rows where 26 match 'queued_' so at page size 25: page 1 has 25 rows and page 2 has 1 row (id=26)
+        _ = try await execute_query(
+            config: config,
+            sql: """
+            CREATE SCHEMA "\(schemaName)";
+            CREATE TABLE "\(schemaName)".work_items (
+                id INT PRIMARY KEY,
+                status TEXT NOT NULL
+            );
+            INSERT INTO "\(schemaName)".work_items (id, status)
+            SELECT g,
+                   CASE WHEN g <= 26 THEN 'queued_' || g ELSE 'done_' || g END
+            FROM generate_series(1, 80) AS g;
+
+            CREATE VIEW "\(schemaName)".slow_search AS
+            SELECT g AS id,
+                   CASE WHEN g = 1 THEN pg_sleep(0.35)::text ELSE '' END || 'row_' || g AS label
+            FROM generate_series(1, 40) AS g;
+            """,
+            queryId: UUID().uuidString
+        )
+
+        let vm = TableDataViewModel(userDefaults: defaults)
+        vm.searchDebounceNanoseconds = 60_000_000
+        vm.setPageSize(25, config: config)
+        try await waitUntilIdle(vm)
+
+        // 1. Rapid typing cancels older/slower search request and keeps only final search results
+        await vm.loadTable(config: config, schema: schemaName, table: "slow_search")
+        vm.openSearchBar()
+        vm.updateSearchInput("row_1", config: config)
+        try await Task.sleep(nanoseconds: 80_000_000) // triggers slow query on row 1 (0.35s)
+        vm.updateSearchInput("row_39", config: config) // supersedes slow query immediately after debounce
+        try await waitUntilIdle(vm)
+        #expect(vm.appliedSearchQuery == "row_39")
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows.first?.cells[0] == .integer(39))
+        #expect(vm.rows.first?.cells[1] == .text("row_39"))
+
+        // 2. Search -> Page 2 -> Edit -> Pending-edit guard -> Apply removes row & steps back to page 1
+        await vm.loadTable(config: config, schema: schemaName, table: "work_items")
+        vm.openSearchBar()
+        vm.updateSearchInput("queued_", config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.rows.count == 25)
+        #expect(vm.hasMore == true)
+
+        vm.nextPage(config: config)
+        try await waitUntilIdle(vm)
+        #expect(vm.currentPage == 2)
+        #expect(vm.rows.count == 1)
+        #expect(vm.rows[0].cells[1] == .integer(26))
+
+        // Stage edit on page 2 row so it will no longer match 'queued_'
+        vm.stageTextEdit(row: 0, column: 1, text: "archived_26")
+        #expect(vm.hasPendingChanges == true)
+
+        // Attempting to change search, page size, jump page, or dismiss with active search triggers pending-edit alert
+        vm.updateSearchInput("done_", config: config)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(vm.showingUnsavedChangesAlert == true)
+        vm.cancelNavigation()
+        #expect(vm.hasPendingChanges == true)
+        #expect(vm.appliedSearchQuery == "queued_")
+        #expect(vm.searchInputText == "queued_")
+
+        vm.setPageSize(50, config: config)
+        #expect(vm.showingUnsavedChangesAlert == true)
+        vm.cancelNavigation()
+        #expect(vm.limit == 25)
+
+        // Apply staged edit: id=26 becomes 'archived_26', disappears from 'queued_', and empty page 2 steps back to page 1
+        await vm.applyStagedEdits(config: config)
+        #expect(vm.errorMessage == nil)
+        #expect(vm.hasPendingChanges == false)
+        #expect(vm.appliedSearchQuery == "queued_")
+        #expect(vm.currentPage == 1)
+        #expect(vm.offset == 0)
+        #expect(vm.rows.count == 25)
+        #expect(vm.hasMore == false)
+        #expect(vm.knownTotalRows == 25)
+
+        _ = try? await execute_query(
+            config: config,
+            sql: "DROP SCHEMA IF EXISTS \"\(schemaName)\" CASCADE;",
+            queryId: UUID().uuidString
+        )
+    }
+
+    @MainActor
+    private func waitUntilIdle(_ vm: TableDataViewModel, timeoutNs: UInt64 = 3_000_000_000) async throws {
+        // Allow debounce + async Task scheduling to enter isLoading first
+        try await Task.sleep(nanoseconds: 90_000_000)
+        let start = DispatchTime.now().uptimeNanoseconds
+        while vm.isLoading {
+            if DispatchTime.now().uptimeNanoseconds - start > timeoutNs {
+                Issue.record("Timed out waiting for TableDataViewModel to finish loading")
+                return
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+    }
 }

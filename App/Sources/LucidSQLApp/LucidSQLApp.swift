@@ -85,6 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findItem = NSMenuItem(
+            title: "Search Table…",
+            action: #selector(performFind(_:)),
+            keyEquivalent: "f"
+        )
+        findItem.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        editMenu.addItem(findItem)
 
         NSApp.mainMenu = mainMenu
     }
@@ -124,9 +132,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         workspaceModel.openConnectionDialog()
     }
 
+    @objc private func performFind(_ sender: Any?) {
+        guard NSApp.keyWindow?.attachedSheet == nil else { return }
+        switch workspaceModel.currentMode {
+        case .tableData:
+            guard workspaceModel.activeConfig != nil, !workspaceModel.selectedTable.isEmpty else {
+                return
+            }
+            workspaceModel.tableViewModel.openSearchBar()
+        case .sqlEditor:
+            if NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: sender) {
+                return
+            }
+            if let contentView = NSApp.keyWindow?.contentView,
+               let sqlTextView = findActiveSqlTextView(in: contentView) {
+                NSApp.keyWindow?.makeFirstResponder(sqlTextView)
+                sqlTextView.performFindPanelAction(sender)
+            }
+        }
+    }
+
+    private func findActiveSqlTextView(in view: NSView) -> SqlKeyHandlingTextView? {
+        if let tv = view as? SqlKeyHandlingTextView, !tv.isHiddenOrHasHiddenAncestor {
+            return tv
+        }
+        for subview in view.subviews {
+            if let found = findActiveSqlTextView(in: subview) {
+                return found
+            }
+        }
+        return nil
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(newQueryTab) {
             return workspaceModel.activeConfig != nil
+        }
+        if menuItem.action == #selector(performFind(_:)) {
+            guard NSApp.keyWindow?.attachedSheet == nil else { return false }
+            switch workspaceModel.currentMode {
+            case .tableData:
+                menuItem.title = "Search Table…"
+                return workspaceModel.activeConfig != nil && !workspaceModel.selectedTable.isEmpty
+            case .sqlEditor:
+                menuItem.title = "Find…"
+                return workspaceModel.activeConfig != nil
+            }
         }
         return true
     }

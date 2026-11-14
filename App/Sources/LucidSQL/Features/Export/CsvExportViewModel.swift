@@ -29,6 +29,8 @@ public enum CsvExportTarget: Sendable {
         hasPrimaryKey: Bool,
         sortCol: String?,
         sortDesc: Bool,
+        searchQuery: String?,
+        searchColumn: String?,
         pendingChangesCount: Int,
         stagedSummary: String
     )
@@ -72,11 +74,33 @@ public final class CsvExportViewModel: Identifiable {
         return false
     }
 
+    public var hasActiveSearchFilter: Bool {
+        if case .tableData(_, _, _, _, _, _, _, _, _, let query, _, _, _) = target {
+            return query != nil && !(query?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+        return false
+    }
+
+    public var activeSearchDescription: String? {
+        guard case .tableData(_, _, _, _, _, _, _, _, _, let query, let searchCol, _, _) = target,
+              let query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        if let searchCol {
+            return "where \"\(searchCol)\" contains \"\(query)\""
+        }
+        return "matching \"\(query)\" across all searchable columns"
+    }
+
+    public var fullTableScopeLabel: String {
+        hasActiveSearchFilter ? "All Matching Rows in Table" : "All Rows in Table"
+    }
+
     public var titleText: String {
         switch target {
         case .sqlResults:
             return "Export Fetched SQL Results to CSV"
-        case .tableData(_, let schema, let table, _, _, _, _, _, _, _, _):
+        case .tableData(_, let schema, let table, _, _, _, _, _, _, _, _, _, _):
             return "Export \(schema).\(table) to CSV"
         }
     }
@@ -86,11 +110,13 @@ public final class CsvExportViewModel: Identifiable {
         case .sqlResults(let tabTitle, _, _, _, _):
             let clean = Self.sanitizeFileNameComponent(tabTitle)
             return "\(clean.isEmpty ? "query" : clean)_fetched_results.csv"
-        case .tableData(_, let schema, let table, _, _, _, _, _, _, _, _):
+        case .tableData(_, let schema, let table, _, _, _, _, _, _, let query, _, _, _):
             let s = Self.sanitizeFileNameComponent(schema)
             let t = Self.sanitizeFileNameComponent(table)
+            let isFiltered = query != nil && !(query?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let filterPart = isFiltered ? "_filtered" : ""
             let suffix = tableScope == .currentPage ? "_page" : "_all"
-            return "\(s)_\(t)\(suffix).csv"
+            return "\(s)_\(t)\(filterPart)\(suffix).csv"
         }
     }
 
@@ -98,7 +124,7 @@ public final class CsvExportViewModel: Identifiable {
         switch target {
         case .sqlResults(_, _, let rows, _, _):
             return rows.count
-        case .tableData(_, _, _, _, let fetchedRows, _, _, _, _, _, _):
+        case .tableData(_, _, _, _, let fetchedRows, _, _, _, _, _, _, _, _):
             return fetchedRows.count
         }
     }
@@ -118,14 +144,14 @@ public final class CsvExportViewModel: Identifiable {
     }
 
     public var hasPendingStagedTableChanges: Bool {
-        if case .tableData(_, _, _, _, _, _, _, _, _, let count, _) = target {
+        if case .tableData(_, _, _, _, _, _, _, _, _, _, _, let count, _) = target {
             return count > 0
         }
         return false
     }
 
     public var pendingStagedSummary: String {
-        if case .tableData(_, _, _, _, _, _, _, _, _, let count, let summary) = target, count > 0 {
+        if case .tableData(_, _, _, _, _, _, _, _, _, _, _, let count, let summary) = target, count > 0 {
             return "\(count) unapplied staged change\(count == 1 ? "" : "s") (\(summary))"
         }
         return ""
@@ -152,7 +178,7 @@ public final class CsvExportViewModel: Identifiable {
             columns = cols
             rows = r
             offset = 0
-        case .tableData(_, _, _, let cols, let r, _, let hasPK, _, _, _, _):
+        case .tableData(_, _, _, let cols, let r, _, let hasPK, _, _, _, _, _, _):
             guard tableScope == .currentPage else { return [] }
             columns = cols
             rows = r
@@ -181,7 +207,7 @@ public final class CsvExportViewModel: Identifiable {
         switch target {
         case .sqlResults(_, let columns, _, _, _):
             return !columns.isEmpty && unsupportedFetchedColumnDetails.isEmpty
-        case .tableData(_, _, _, let columns, _, _, _, _, _, _, _):
+        case .tableData(_, _, _, let columns, _, _, _, _, _, _, _, _, _):
             if tableScope == .currentPage {
                 return !columns.isEmpty && unsupportedFetchedColumnDetails.isEmpty
             }
@@ -264,7 +290,7 @@ public final class CsvExportViewModel: Identifiable {
                     self.statusMessage =
                         "Exported \(result.rowsExported) fetched rows\(truncNote) (\(Self.formatByteCount(result.bytesWritten))) to \(destinationURL.lastPathComponent)."
 
-                case .tableData(let config, let schema, let table, let columns, let fetchedRows, _, let hasPrimaryKey, let sortCol, let sortDesc, _, _):
+                case .tableData(let config, let schema, let table, let columns, let fetchedRows, _, let hasPrimaryKey, let sortCol, let sortDesc, let searchQuery, let searchColumn, _, _):
                     if currentScope == .currentPage {
                         result = try await export_fetched_rows_csv(
                             columns: columns,
@@ -272,14 +298,17 @@ public final class CsvExportViewModel: Identifiable {
                             destinationPath: destPath,
                             excludeLeadingXmin: hasPrimaryKey
                         )
+                        let filteredNote = hasActiveSearchFilter ? " (filtered)" : ""
                         self.statusMessage =
-                            "Exported current page (\(result.rowsExported) rows, \(Self.formatByteCount(result.bytesWritten))) to \(destinationURL.lastPathComponent)."
+                            "Exported current page\(filteredNote) (\(result.rowsExported) rows, \(Self.formatByteCount(result.bytesWritten))) to \(destinationURL.lastPathComponent)."
                     } else {
                         let req = TableCsvExportRequest(
                             schemaName: schema,
                             tableName: table,
                             sortCol: sortCol,
-                            sortDesc: sortDesc
+                            sortDesc: sortDesc,
+                            searchQuery: searchQuery,
+                            searchColumn: searchColumn
                         )
                         result = try await export_table_csv(
                             config: config,
@@ -288,8 +317,9 @@ public final class CsvExportViewModel: Identifiable {
                             exportId: exportId
                         )
                         let snap = result.snapshotIsolation ?? "REPEATABLE READ"
+                        let noun = hasActiveSearchFilter ? "matching rows" : "rows"
                         self.statusMessage =
-                            "Exported \(result.rowsExported) rows (\(Self.formatByteCount(result.bytesWritten))) in \(result.executionDurationMs) ms (\(snap)) to \(destinationURL.lastPathComponent)."
+                            "Exported \(result.rowsExported) \(noun) (\(Self.formatByteCount(result.bytesWritten))) in \(result.executionDurationMs) ms (\(snap)) to \(destinationURL.lastPathComponent)."
                     }
                 }
 

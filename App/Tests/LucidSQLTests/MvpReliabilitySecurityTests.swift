@@ -176,6 +176,8 @@ struct MvpReliabilitySecurityTests {
                 hasPrimaryKey: true,
                 sortCol: nil,
                 sortDesc: false,
+                searchQuery: nil,
+                searchColumn: nil,
                 pendingChangesCount: 1,
                 stagedSummary: "1 edit"
             )

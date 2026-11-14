@@ -62,6 +62,10 @@ public func fetch_table_page(
     try await fetchTablePage(config: config, schema: schema, table: table, offset: offset, limit: limit, sortCol: sortCol, sortDesc: sortDesc)
 }
 
+public func is_pg_type_searchable(pgTypeName: String) -> Bool {
+    isPgTypeSearchable(pgTypeName: pgTypeName)
+}
+
 public func load_table_page(
     config: ConnectionConfig,
     schema: String,
@@ -70,7 +74,10 @@ public func load_table_page(
     limit: UInt32,
     sortCol: String? = nil,
     sortDesc: Bool = false,
-    knownHasPrimaryKey: Bool? = nil
+    knownHasPrimaryKey: Bool? = nil,
+    searchQuery: String? = nil,
+    searchColumn: String? = nil,
+    queryId: String? = nil
 ) async throws -> TablePageResult {
     try await loadTablePage(
         config: config,
@@ -80,7 +87,10 @@ public func load_table_page(
         limit: limit,
         sortCol: sortCol,
         sortDesc: sortDesc,
-        knownHasPrimaryKey: knownHasPrimaryKey
+        knownHasPrimaryKey: knownHasPrimaryKey,
+        searchQuery: searchQuery,
+        searchColumn: searchColumn,
+        queryId: queryId
     )
 }
 

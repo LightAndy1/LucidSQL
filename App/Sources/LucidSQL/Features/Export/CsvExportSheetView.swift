@@ -54,30 +54,38 @@ public struct CsvExportSheetView: View {
                     }
                 }
 
-            case .tableData(_, _, _, _, let fetchedRows, let offset, _, let sortCol, let sortDesc, _, _):
+            case .tableData(_, _, _, _, let fetchedRows, let offset, let hasPrimaryKey, let sortCol, let sortDesc, _, _, _, _):
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Export Scope")
                         .font(.system(size: 12, weight: .semibold))
 
                     Picker("Export Scope", selection: $viewModel.tableScope) {
-                        Text("Current Fetched Page (\(fetchedRows.count) rows, from #\(offset + 1))")
+                        Text(viewModel.hasActiveSearchFilter
+                            ? "Current Fetched Page (\(fetchedRows.count) matching rows, from #\(offset + 1))"
+                            : "Current Fetched Page (\(fetchedRows.count) rows, from #\(offset + 1))")
                             .tag(TableExportScope.currentPage)
-                        Text("All Rows in Table")
+                        Text(viewModel.fullTableScopeLabel)
                             .tag(TableExportScope.allRows)
                     }
                     .pickerStyle(.radioGroup)
                     .disabled(viewModel.isExporting)
 
                     if viewModel.tableScope == .allRows {
-                        let orderDesc = sortCol.map { "ordered by \"\($0)\" \(sortDesc ? "DESC" : "ASC")" } ?? "natural scan order (no column filters active)"
+                        let orderDesc = sortCol.map {
+                            hasPrimaryKey
+                                ? "ordered by \"\($0)\" \(sortDesc ? "DESC" : "ASC") with primary-key tie-breaker"
+                                : "ordered by \"\($0)\" \(sortDesc ? "DESC" : "ASC")"
+                        } ?? (hasPrimaryKey ? "ordered by primary key" : "natural scan order")
+                        let filterDesc = viewModel.activeSearchDescription.map { "filtered \($0), " } ?? ""
                         infoBox(
-                            title: "Streaming Snapshot Consistency",
-                            message: "Streams directly from Rust to a temporary file on a separate PostgreSQL connection inside REPEATABLE READ READ ONLY (\(orderDesc)). Open SQL-tab transactions are unaffected, and the destination file is written atomically only on full success."
+                            title: viewModel.hasActiveSearchFilter ? "Filtered Streaming Snapshot Consistency" : "Streaming Snapshot Consistency",
+                            message: "Streams \(viewModel.hasActiveSearchFilter ? "matching rows" : "all rows") (\(filterDesc)\(orderDesc)) directly from Rust to a temporary file on a separate PostgreSQL connection inside REPEATABLE READ READ ONLY. Open SQL-tab transactions are unaffected, and the destination file is written atomically only on full success."
                         )
                     } else {
+                        let filterDesc = viewModel.activeSearchDescription.map { " (\($0))" } ?? ""
                         infoBox(
                             title: "Fetched Page Snapshot",
-                            message: "Exports the \(fetchedRows.count) fetched database row(s) currently loaded in memory on this page (hidden internal xmin column omitted)."
+                            message: "Exports the \(fetchedRows.count) fetched database row(s) currently loaded in memory on this page\(filterDesc) (hidden internal xmin column omitted)."
                         )
                     }
 
@@ -99,7 +107,7 @@ public struct CsvExportSheetView: View {
             if !unsupportedCols.isEmpty {
                 warningBox(
                     title: "Unsupported Column Type(s) in Fetched Result",
-                    message: "Cannot export placeholder text for: \(unsupportedCols.joined(separator: ", ")). \(viewModel.isSqlTarget ? "Cast those columns with ::text in SQL to export their PostgreSQL text representations." : "Switch scope to \"All Rows in Table\" so PostgreSQL streams their canonical ::text representations.")"
+                    message: "Cannot export placeholder text for: \(unsupportedCols.joined(separator: ", ")). \(viewModel.isSqlTarget ? "Cast those columns with ::text in SQL to export their PostgreSQL text representations." : "Switch scope to \"\(viewModel.fullTableScopeLabel)\" so PostgreSQL streams their canonical ::text representations.")"
                 )
             }
 

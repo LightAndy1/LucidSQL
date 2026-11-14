@@ -16,7 +16,9 @@ use crate::query::execute::{
     cancel_active_query, map_postgres_error, register_cancel_token_with_tls,
     unregister_cancel_token,
 };
-use crate::query::{map_cell_value, CellValue, RowData};
+use crate::query::{
+    build_order_clause, build_search_filter, map_cell_value, CellValue, RowData,
+};
 use crate::schema::{query_columns, ColumnMetadata};
 
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
@@ -43,6 +45,8 @@ pub struct TableCsvExportRequest {
     pub table_name: String,
     pub sort_col: Option<String>,
     pub sort_desc: bool,
+    pub search_query: Option<String>,
+    pub search_column: Option<String>,
 }
 
 struct ExportRunState {
@@ -541,23 +545,25 @@ pub async fn export_table_csv(
         });
     }
 
-    let order_clause = if let Some(ref sort_col) = request.sort_col {
-        if !columns.iter().any(|c| &c.name == sort_col) {
+    let order_clause = match build_order_clause(&columns, request.sort_col.as_deref(), request.sort_desc) {
+        Ok(clause) => clause,
+        Err(err) => {
             rollback_with_timeout(&client).await;
-            return Err(LucidError::DatabaseError {
-                code: "42703".into(),
-                message: format!(
-                    "Sort column '{}' does not exist on '{}.{}'.",
-                    sort_col, request.schema_name, request.table_name
-                ),
-                detail: None,
-            });
+            return Err(err);
         }
-        let clean_sort = sanitize_identifier(sort_col);
-        let dir = if request.sort_desc { "DESC" } else { "ASC" };
-        format!(r#" ORDER BY "{}" {}"#, clean_sort, dir)
-    } else {
-        String::new()
+    };
+
+    let search_filter = match build_search_filter(
+        &columns,
+        request.search_query.as_deref(),
+        request.search_column.as_deref(),
+        1,
+    ) {
+        Ok(filter) => filter,
+        Err(err) => {
+            rollback_with_timeout(&client).await;
+            return Err(err);
+        }
     };
 
     let projections: Vec<String> = columns
@@ -575,10 +581,11 @@ pub async fn export_table_csv(
     let clean_schema = sanitize_identifier(&request.schema_name);
     let clean_table = sanitize_identifier(&request.table_name);
     let sql = format!(
-        r#"SELECT {} FROM "{}"."{}"{}"#,
+        r#"SELECT {} FROM "{}"."{}"{}{}"#,
         projections.join(", "),
         clean_schema,
         clean_table,
+        search_filter.where_clause,
         order_clause
     );
 
@@ -599,13 +606,18 @@ pub async fn export_table_csv(
         }
     };
 
+    let query_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match search_filter.pattern_param {
+        Some(ref pattern) => vec![pattern],
+        None => Vec::new(),
+    };
+
     let stream = tokio::select! {
         biased;
         _ = run_state.cancel_notify.notified() => {
             rollback_with_timeout(&client).await;
             return Err(LucidError::QueryCancelled);
         }
-        res = client.query_raw(&stmt, std::iter::empty::<i32>()) => {
+        res = client.query_raw(&stmt, query_params) => {
             match res {
                 Ok(s) => s,
                 Err(e) => {
@@ -971,6 +983,8 @@ mod tests {
                 table_name: "events".into(),
                 sort_col: Some("id".into()),
                 sort_desc: false,
+                search_query: None,
+                search_column: None,
             },
             dest.to_string_lossy().into_owned(),
             export_id.clone(),
@@ -1062,6 +1076,8 @@ mod tests {
                     table_name: "slow_rows".into(),
                     sort_col: None,
                     sort_desc: false,
+                    search_query: None,
+                    search_column: None,
                 },
                 dest_str,
                 export_id_clone,
@@ -1096,6 +1112,99 @@ mod tests {
         );
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(entries.len(), 1);
+
+        let _ = setup_client
+            .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))
+            .await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_export_honors_search_filter_and_literal_wildcards() {
+        let config = get_test_config();
+        let pool = ManagedPool::new(&config).unwrap();
+        let setup_client = pool.get().await.unwrap();
+
+        let schema = format!(
+            "lucidsql_csv_search_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        setup_client
+            .batch_execute(&format!(
+                r#"
+                CREATE SCHEMA "{schema}";
+                CREATE TABLE "{schema}".items (
+                    id int PRIMARY KEY,
+                    name text,
+                    notes text,
+                    raw_blob bytea
+                );
+                INSERT INTO "{schema}".items (id, name, notes, raw_blob)
+                SELECT
+                    g,
+                    CASE
+                        WHEN g = 10 THEN '50%_discount'
+                        WHEN g = 110 THEN '50%_vip'
+                        WHEN g = 120 THEN '500_regular'
+                        ELSE 'item_' || g
+                    END,
+                    CASE WHEN g = 115 THEN 'contains 50%_note' ELSE 'normal' END,
+                    E'\\x5025'::bytea
+                FROM generate_series(1, 130) AS g;
+                "#,
+                schema = schema
+            ))
+            .await
+            .unwrap();
+
+        let dir = unique_temp_dir("stream_filtered");
+        let dest_all = dir.join("filtered_all_cols.csv");
+        let res_all = export_table_csv(
+            config.clone(),
+            TableCsvExportRequest {
+                schema_name: schema.clone(),
+                table_name: "items".into(),
+                sort_col: None,
+                sort_desc: false,
+                search_query: Some("50%_".into()),
+                search_column: None,
+            },
+            dest_all.to_string_lossy().into_owned(),
+            format!("exp_flt_all_{}", uuid::Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res_all.rows_exported, 3);
+        let csv_all = std::fs::read_to_string(&dest_all).unwrap();
+        assert!(csv_all.contains("10,50%_discount"));
+        assert!(csv_all.contains("110,50%_vip"));
+        assert!(csv_all.contains("115,item_115,contains 50%_note"));
+        assert!(!csv_all.contains("500_regular"));
+
+        let dest_col = dir.join("filtered_name_col.csv");
+        let res_col = export_table_csv(
+            config.clone(),
+            TableCsvExportRequest {
+                schema_name: schema.clone(),
+                table_name: "items".into(),
+                sort_col: Some("id".into()),
+                sort_desc: true,
+                search_query: Some("50%_".into()),
+                search_column: Some("name".into()),
+            },
+            dest_col.to_string_lossy().into_owned(),
+            format!("exp_flt_col_{}", uuid::Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res_col.rows_exported, 2);
+        let csv_col = std::fs::read_to_string(&dest_col).unwrap();
+        let lines: Vec<&str> = csv_col.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("110,50%_vip"));
+        assert!(lines[2].starts_with("10,50%_discount"));
 
         let _ = setup_client
             .batch_execute(&format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#, schema))

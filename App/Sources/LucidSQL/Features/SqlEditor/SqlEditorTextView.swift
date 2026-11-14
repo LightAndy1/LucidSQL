@@ -40,6 +40,8 @@ public struct SqlEditorTextView: NSViewRepresentable {
         textView.isRichText = false
         textView.usesFontPanel = false
         textView.allowsUndo = true
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
         textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.textColor = NSColor.labelColor
         textView.backgroundColor = NSColor.clear

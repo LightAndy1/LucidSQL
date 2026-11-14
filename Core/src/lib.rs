@@ -155,6 +155,23 @@ pub async fn introspect_columns(
 }
 
 #[uniffi::export]
+pub fn is_pg_type_searchable(pg_type_name: String) -> bool {
+    query::is_searchable_pg_type(&pg_type_name)
+}
+
+struct TableQueryCancelGuard {
+    query_id: Option<String>,
+}
+
+impl Drop for TableQueryCancelGuard {
+    fn drop(&mut self) {
+        if let Some(ref qid) = self.query_id {
+            query::execute::unregister_cancel_token(qid);
+        }
+    }
+}
+
+#[uniffi::export]
 pub async fn load_table_page(
     config: ConnectionConfig,
     schema: String,
@@ -164,24 +181,46 @@ pub async fn load_table_page(
     sort_col: Option<String>,
     sort_desc: bool,
     known_has_primary_key: Option<bool>,
+    search_query: Option<String>,
+    search_column: Option<String>,
+    query_id: Option<String>,
 ) -> Result<TablePageResult, LucidError> {
     get_runtime()
         .spawn(async move {
             let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
-            let (columns, has_pk) = match known_has_primary_key {
-                Some(has_pk) => (Vec::new(), has_pk),
-                None => {
-                    let cols = schema::query_columns(&client, &schema, &table).await?;
-                    let has_pk = cols.iter().any(|c| c.is_primary_key);
-                    (cols, has_pk)
+
+            let _cancel_guard = if let Some(ref qid) = query_id {
+                let cancel_tls = connection::tls::CancelTlsTarget::from_config(&config)?;
+                query::execute::register_cancel_token_with_tls(qid, client.cancel_token(), cancel_tls);
+                TableQueryCancelGuard {
+                    query_id: Some(qid.clone()),
                 }
+            } else {
+                TableQueryCancelGuard { query_id: None }
             };
-            let page = query::fetch_page(
-                &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
+
+            let force_refresh = known_has_primary_key.is_none();
+            let cols = schema::query_columns_cached(&client, &config, &schema, &table, force_refresh).await?;
+            let returned_columns = if force_refresh { cols.clone() } else { Vec::new() };
+
+            let page = query::fetch_page_with_columns(
+                &client,
+                &schema,
+                &table,
+                &cols,
+                offset,
+                limit,
+                sort_col.as_deref(),
+                sort_desc,
+                search_query.as_deref(),
+                search_column.as_deref(),
             )
             .await?;
-            Ok(TablePageResult { columns, page })
+            Ok(TablePageResult {
+                columns: returned_columns,
+                page,
+            })
         })
         .await
         .map_err(|e| LucidError::DatabaseError {
@@ -206,9 +245,17 @@ pub async fn fetch_table_page(
             let pool = connection::ManagedPool::shared(&config)?;
             let client = pool.get().await?;
             let cols = schema::query_columns(&client, &schema, &table).await?;
-            let has_pk = cols.iter().any(|c| c.is_primary_key);
-            query::fetch_page(
-                &client, &schema, &table, offset, limit, sort_col, sort_desc, has_pk,
+            query::fetch_page_with_columns(
+                &client,
+                &schema,
+                &table,
+                &cols,
+                offset,
+                limit,
+                sort_col.as_deref(),
+                sort_desc,
+                None,
+                None,
             )
             .await
         })
@@ -302,6 +349,7 @@ pub async fn close_session(session_id: String) -> Result<(), LucidError> {
 pub async fn close_all_sessions() -> Result<(), LucidError> {
     get_runtime()
         .spawn(async move {
+            schema::clear_column_metadata_cache();
             connection::close_all_cached_pools();
             connection::close_all_sessions().await
         })

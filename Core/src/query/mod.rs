@@ -4,7 +4,10 @@ pub mod splitter;
 pub mod value_mapper;
 
 pub use execute::{cancel_active_query, execute_sql, QueryResult};
-pub use paged_table::fetch_page;
+pub use paged_table::{
+    build_order_clause, build_search_filter, fetch_page, fetch_page_with_columns,
+    is_searchable_pg_type,
+};
 pub use value_mapper::map_cell_value;
 
 #[derive(uniffi::Enum, Clone, Debug, PartialEq)]
