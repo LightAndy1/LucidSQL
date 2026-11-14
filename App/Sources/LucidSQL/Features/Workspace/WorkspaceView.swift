@@ -783,8 +783,18 @@ private struct WelcomeView: View {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                                     .fill(Color(NSColor.controlBackgroundColor))
                             } else {
+                                #if compiler(>=6.2)
+                                if #available(macOS 26.0, *) {
+                                    Color.clear
+                                        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                } else {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(.regularMaterial)
+                                }
+                                #else
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                                     .fill(.regularMaterial)
+                                #endif
                             }
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
