@@ -226,6 +226,36 @@ let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 
 @MainActor
+func renderCompositeSVG(_ xmls: [String], renderer: SvgLayerRenderer) async throws -> CGImage {
+    let images = try await withThrowingTaskGroup(of: (Int, CGImage).self) { _ in
+        var rendered: [CGImage] = []
+        rendered.reserveCapacity(xmls.count)
+        for xml in xmls {
+            rendered.append(try await renderer.render(svgXML: xml))
+        }
+        return rendered
+    }
+    if images.count == 1 {
+        return images[0]
+    }
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let ctx = CGContext(
+        data: nil,
+        width: 1024,
+        height: 1024,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: cs,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    let fullRect = CGRect(x: 0, y: 0, width: 1024, height: 1024)
+    for img in images {
+        ctx.draw(img, in: fullRect)
+    }
+    return ctx.makeImage()!
+}
+
+@MainActor
 func runMain() async throws {
     let args = CommandLine.arguments
     let scriptURL = URL(fileURLWithPath: args[0])
@@ -239,18 +269,28 @@ func runMain() async throws {
     }
 
         let glowSVG = try String(contentsOf: assetsDir.appendingPathComponent("01-ambient-glow.svg"), encoding: .utf8)
-        let botSVG = try String(contentsOf: assetsDir.appendingPathComponent("02-cylinder-bottom.svg"), encoding: .utf8)
-        let midSVG = try String(contentsOf: assetsDir.appendingPathComponent("03-cylinder-middle.svg"), encoding: .utf8)
-        let topSVG = try String(contentsOf: assetsDir.appendingPathComponent("04-cylinder-top.svg"), encoding: .utf8)
+        let botSVGs = [
+            try String(contentsOf: assetsDir.appendingPathComponent("02-cylinder-bottom.svg"), encoding: .utf8),
+            try String(contentsOf: assetsDir.appendingPathComponent("02b-cylinder-bottom-cap.svg"), encoding: .utf8),
+        ]
+        let midSVGs = [
+            try String(contentsOf: assetsDir.appendingPathComponent("03-cylinder-middle.svg"), encoding: .utf8),
+            try String(contentsOf: assetsDir.appendingPathComponent("03b-cylinder-middle-cap.svg"), encoding: .utf8),
+        ]
+        let topSVGs = [
+            try String(contentsOf: assetsDir.appendingPathComponent("04-cylinder-top.svg"), encoding: .utf8),
+            try String(contentsOf: assetsDir.appendingPathComponent("04b-cylinder-top-cap.svg"), encoding: .utf8),
+            try String(contentsOf: assetsDir.appendingPathComponent("04c-cylinder-top-dish.svg"), encoding: .utf8),
+        ]
         let specSVG = try String(contentsOf: assetsDir.appendingPathComponent("05-specular-highlights.svg"), encoding: .utf8)
 
         let renderer = await SvgLayerRenderer()
 
         // Color SVG layers
         let glowCG = try await renderer.render(svgXML: glowSVG)
-        let botCG = try await renderer.render(svgXML: botSVG)
-        let midCG = try await renderer.render(svgXML: midSVG)
-        let topCG = try await renderer.render(svgXML: topSVG)
+        let botCG = try await renderCompositeSVG(botSVGs, renderer: renderer)
+        let midCG = try await renderCompositeSVG(midSVGs, renderer: renderer)
+        let topCG = try await renderCompositeSVG(topSVGs, renderer: renderer)
         let specCG = try await renderer.render(svgXML: specSVG)
 
         let defaultSpec = VariantSpec(
@@ -284,14 +324,14 @@ func runMain() async throws {
 
         if let previewOutPath {
             // Render monochrome SVG layers (white/ice-silver for dark/tinted, slate-ink for clear light)
-            let mBotLight = try await renderer.render(svgXML: makeMonochromeSVG(botSVG, fillHex: "#334155", strokeHex: "#0F172A"))
-            let mMidLight = try await renderer.render(svgXML: makeMonochromeSVG(midSVG, fillHex: "#475569", strokeHex: "#0F172A"))
-            let mTopLight = try await renderer.render(svgXML: makeMonochromeSVG(topSVG, fillHex: "#64748B", strokeHex: "#1E293B"))
+            let mBotLight = try await renderCompositeSVG(botSVGs.map { makeMonochromeSVG($0, fillHex: "#334155", strokeHex: "#0F172A") }, renderer: renderer)
+            let mMidLight = try await renderCompositeSVG(midSVGs.map { makeMonochromeSVG($0, fillHex: "#475569", strokeHex: "#0F172A") }, renderer: renderer)
+            let mTopLight = try await renderCompositeSVG(topSVGs.map { makeMonochromeSVG($0, fillHex: "#64748B", strokeHex: "#1E293B") }, renderer: renderer)
             let mSpecLight = try await renderer.render(svgXML: makeMonochromeSVG(specSVG, fillHex: "#0F172A", strokeHex: "#FFFFFF"))
 
-            let mBotDark = try await renderer.render(svgXML: makeMonochromeSVG(botSVG, fillHex: "#CBD5E1", strokeHex: "#F8FAFC"))
-            let mMidDark = try await renderer.render(svgXML: makeMonochromeSVG(midSVG, fillHex: "#E2E8F0", strokeHex: "#FFFFFF"))
-            let mTopDark = try await renderer.render(svgXML: makeMonochromeSVG(topSVG, fillHex: "#F8FAFC", strokeHex: "#FFFFFF"))
+            let mBotDark = try await renderCompositeSVG(botSVGs.map { makeMonochromeSVG($0, fillHex: "#CBD5E1", strokeHex: "#F8FAFC") }, renderer: renderer)
+            let mMidDark = try await renderCompositeSVG(midSVGs.map { makeMonochromeSVG($0, fillHex: "#E2E8F0", strokeHex: "#FFFFFF") }, renderer: renderer)
+            let mTopDark = try await renderCompositeSVG(topSVGs.map { makeMonochromeSVG($0, fillHex: "#F8FAFC", strokeHex: "#FFFFFF") }, renderer: renderer)
             let mSpecDark = try await renderer.render(svgXML: makeMonochromeSVG(specSVG, fillHex: "#FFFFFF", strokeHex: "#FFFFFF"))
 
             let variants: [(VariantSpec, Bool)] = [

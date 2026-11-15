@@ -58,7 +58,7 @@
       "name": "database-cylinder",
       "layers": [
         {
-          "name": "cylinder-bottom",
+          "name": "cylinder-bottom-wall",
           "image-name": "02-cylinder-bottom.svg",
           "glass": true,
           "fill-specializations": [
@@ -67,18 +67,38 @@
             {
               "appearance": "tinted",
               "value": {
-                "solid": "srgb:0.86275,0.89020,0.92549,1.00000"
+                "solid": "srgb:0.65098,0.69020,0.74510,1.00000"
               }
             }
           ],
           "opacity-specializations": [
             { "value": 1.0 },
             { "appearance": "dark", "value": 1.0 },
-            { "appearance": "tinted", "value": 0.58 }
+            { "appearance": "tinted", "value": 0.42 }
           ]
         },
         {
-          "name": "cylinder-middle",
+          "name": "cylinder-bottom-cap",
+          "image-name": "02b-cylinder-bottom-cap.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.88235,0.90980,0.94510,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.56 }
+          ]
+        },
+        {
+          "name": "cylinder-middle-wall",
           "image-name": "03-cylinder-middle.svg",
           "glass": true,
           "fill-specializations": [
@@ -87,18 +107,38 @@
             {
               "appearance": "tinted",
               "value": {
-                "solid": "srgb:0.92157,0.94118,0.96471,1.00000"
+                "solid": "srgb:0.72549,0.76471,0.81569,1.00000"
               }
             }
           ],
           "opacity-specializations": [
             { "value": 1.0 },
             { "appearance": "dark", "value": 1.0 },
-            { "appearance": "tinted", "value": 0.76 }
+            { "appearance": "tinted", "value": 0.52 }
           ]
         },
         {
-          "name": "cylinder-top",
+          "name": "cylinder-middle-cap",
+          "image-name": "03b-cylinder-middle-cap.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.93333,0.95294,0.97647,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.70 }
+          ]
+        },
+        {
+          "name": "cylinder-top-wall",
           "image-name": "04-cylinder-top.svg",
           "glass": true,
           "fill-specializations": [
@@ -107,14 +147,54 @@
             {
               "appearance": "tinted",
               "value": {
-                "solid": "srgb:0.97647,0.98431,0.99608,1.00000"
+                "solid": "srgb:0.79608,0.83137,0.87451,1.00000"
               }
             }
           ],
           "opacity-specializations": [
             { "value": 1.0 },
             { "appearance": "dark", "value": 1.0 },
-            { "appearance": "tinted", "value": 0.96 }
+            { "appearance": "tinted", "value": 0.64 }
+          ]
+        },
+        {
+          "name": "cylinder-top-cap",
+          "image-name": "04b-cylinder-top-cap.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.98039,0.98824,0.99608,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.92 }
+          ]
+        },
+        {
+          "name": "cylinder-top-dish",
+          "image-name": "04c-cylinder-top-dish.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.73725,0.77647,0.82745,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.36 }
           ]
         }
       ],
@@ -148,7 +228,7 @@
           "opacity-specializations": [
             { "value": 0.9 },
             { "appearance": "dark", "value": 1.0 },
-            { "appearance": "tinted", "value": 1.0 }
+            { "appearance": "tinted", "value": 0.92 }
           ]
         }
       ],

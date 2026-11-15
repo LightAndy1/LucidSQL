@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="topDishInner" cx="50%" cy="54%" r="52%">
+      <stop offset="0%" stop-color="#E0F2FE" stop-opacity="0.68"/>
+      <stop offset="65%" stop-color="#38BDF8" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.52"/>
+    </radialGradient>
+  </defs>
+  <!-- Recessed glass dish for optical depth -->
+  <ellipse cx="512" cy="316" rx="212" ry="52" fill="url(#topDishInner)" stroke="#BAE6FD" stroke-opacity="0.45" stroke-width="3"/>
+</svg>

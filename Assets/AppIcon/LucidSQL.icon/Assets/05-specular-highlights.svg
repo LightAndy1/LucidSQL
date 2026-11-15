@@ -1,20 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <defs>
-    <linearGradient id="leftSheenH" x1="286" y1="0" x2="366" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.0"/>
-      <stop offset="35%" stop-color="#FFFFFF" stop-opacity="0.34"/>
-      <stop offset="70%" stop-color="#BAE6FD" stop-opacity="0.16"/>
-      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.0"/>
-    </linearGradient>
-  </defs>
-  <!-- Crisp upper back rim specular highlight -->
-  <path d="M 278 285 A 256 76 0 0 1 746 285" fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="4.5" stroke-linecap="round"/>
-  <!-- Front lip specular arcs separating the three tiers unmistakably at small sizes -->
-  <path d="M 270 432 A 256 76 0 0 0 754 432" fill="none" stroke="#ECFEFF" stroke-opacity="0.92" stroke-width="5.5" stroke-linecap="round"/>
-  <path d="M 270 588 A 256 76 0 0 0 754 588" fill="none" stroke="#BAE6FD" stroke-opacity="0.86" stroke-width="5.5" stroke-linecap="round"/>
-  <path d="M 270 744 A 256 76 0 0 0 754 744" fill="none" stroke="#7DD3FC" stroke-opacity="0.80" stroke-width="5.5" stroke-linecap="round"/>
-  <!-- Soft horizontal-feathered left cylindrical glass sheen -->
-  <path d="M 288 353 L 288 445 A 256 76 0 0 0 364 470 L 364 378 A 256 76 0 0 1 288 353 Z" fill="url(#leftSheenH)"/>
-  <path d="M 288 509 L 288 601 A 256 76 0 0 0 364 626 L 364 534 A 256 76 0 0 1 288 509 Z" fill="url(#leftSheenH)"/>
-  <path d="M 288 665 L 288 757 A 256 76 0 0 0 364 782 L 364 690 A 256 76 0 0 1 288 665 Z" fill="url(#leftSheenH)"/>
+  <!-- Crisp top back rim highlight matching top cap ellipse -->
+  <path d="M 258 316 A 256 76 0 0 1 766 316" fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="4" stroke-linecap="round"/>
+  <!-- Aligned front lip specular arcs separating the three tiers -->
+  <path d="M 256 408 A 256 76 0 0 0 768 408" fill="none" stroke="#ECFEFF" stroke-opacity="0.90" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M 256 564 A 256 76 0 0 0 768 564" fill="none" stroke="#BAE6FD" stroke-opacity="0.82" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M 256 720 A 256 76 0 0 0 768 720" fill="none" stroke="#7DD3FC" stroke-opacity="0.74" stroke-width="4.5" stroke-linecap="round"/>
 </svg>

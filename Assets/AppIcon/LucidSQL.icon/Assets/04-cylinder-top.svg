@@ -7,22 +7,8 @@
       <stop offset="86%" stop-color="#0284C7" stop-opacity="0.82"/>
       <stop offset="100%" stop-color="#BAE6FD" stop-opacity="0.82"/>
     </linearGradient>
-    <linearGradient id="topCapGrad" x1="512" y1="240" x2="512" y2="392" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#ECFEFF" stop-opacity="0.92"/>
-      <stop offset="52%" stop-color="#67E8F9" stop-opacity="0.68"/>
-      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.54"/>
-    </linearGradient>
-    <radialGradient id="topDishInner" cx="50%" cy="54%" r="52%">
-      <stop offset="0%" stop-color="#E0F2FE" stop-opacity="0.68"/>
-      <stop offset="65%" stop-color="#38BDF8" stop-opacity="0.34"/>
-      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.52"/>
-    </radialGradient>
   </defs>
   <!-- Top cylinder outer body -->
   <path d="M 256 316 A 256 76 0 0 0 768 316 L 768 408 A 256 76 0 0 1 256 408 Z"
         fill="url(#topWallGrad)" stroke="#E0F2FE" stroke-opacity="0.88" stroke-width="5" stroke-linejoin="round"/>
-  <!-- Top cylinder cap face -->
-  <ellipse cx="512" cy="316" rx="256" ry="76" fill="url(#topCapGrad)" stroke="#ECFEFF" stroke-opacity="0.95" stroke-width="5"/>
-  <!-- Recessed glass dish for authentic optical depth -->
-  <ellipse cx="512" cy="316" rx="216" ry="54" fill="url(#topDishInner)" stroke="#BAE6FD" stroke-opacity="0.45" stroke-width="3"/>
 </svg>
