@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/bundle-verify.sh"
 
 REQUIRE_LIQUID_GLASS="false"
+REQUIRE_NATIVE_ICON="false"
 ISOLATE_BUILD_DIRS="false"
 SKIP_LAUNCH="false"
 DMG_PATH=""
@@ -22,6 +23,7 @@ and launches the relocated copy with build directories isolated and DYLD_* unset
 
 Options:
   --require-liquid-glass     Verify compiled Liquid Glass symbols inside the copied .app
+  --require-native-icon      Verify compiled Assets.car inside the copied .app bundle
   --isolate-repo-build-dirs  Temporarily hide Core/target and App/.build during launch test
   --skip-launch              Skip launching the relocated app (Mach-O + codesign checks only)
   -h, --help                 Show this help
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --require-liquid-glass)
             REQUIRE_LIQUID_GLASS="true"
+            shift
+            ;;
+        --require-native-icon)
+            REQUIRE_NATIVE_ICON="true"
             shift
             ;;
         --isolate-repo-build-dirs)
@@ -137,6 +143,18 @@ if [[ -n "$(find "${MOUNT_DIR}" -maxdepth 2 -name "*.zip")" ]]; then
     echo "Error: Unexpected nested .zip found inside DMG." >&2
     exit 1
 fi
+if [[ ! -f "${MOUNT_DIR}/.DS_Store" ]]; then
+    echo "Error: Finder layout .DS_Store missing inside DMG." >&2
+    exit 1
+fi
+if [[ ! -f "${MOUNT_DIR}/.background/bg.png" ]]; then
+    echo "Error: DMG background image missing at .background/bg.png." >&2
+    exit 1
+fi
+if [[ ! -f "${MOUNT_DIR}/.VolumeIcon.icns" ]]; then
+    echo "Error: DMG custom volume icon missing at .VolumeIcon.icns." >&2
+    exit 1
+fi
 
 echo "=== 4. Copying LucidSQL.app to Fresh Relocated Directory ==="
 RELOCATED_APP="${RELOCATED_DIR}/LucidSQL.app"
@@ -147,10 +165,21 @@ echo "=== 5. Verifying Relocated Bundle Signature, Provenance & Mach-O Linkage =
 RELOCATED_EXEC="${RELOCATED_APP}/Contents/MacOS/LucidSQLApp"
 RELOCATED_DYLIB="${RELOCATED_APP}/Contents/Frameworks/liblucidsql_core.dylib"
 PLIST_PATH="${RELOCATED_APP}/Contents/Info.plist"
+ICON_ICNS_PATH="${RELOCATED_APP}/Contents/Resources/LucidSQL.icns"
+ASSETS_CAR_PATH="${RELOCATED_APP}/Contents/Resources/Assets.car"
 
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
 APP_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
 APP_COMMIT="$(/usr/libexec/PlistBuddy -c 'Print :LucidSQLGitCommit' "${PLIST_PATH}" 2>/dev/null || echo 'unknown')"
+APP_ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${PLIST_PATH}" 2>/dev/null || echo '')"
+if [[ "${APP_ICON_FILE}" != "LucidSQL" || ! -f "${ICON_ICNS_PATH}" ]]; then
+    echo "Error: Fallback app icon metadata/resource missing (CFBundleIconFile='${APP_ICON_FILE}', icns=${ICON_ICNS_PATH})." >&2
+    exit 1
+fi
+if [[ "${REQUIRE_NATIVE_ICON}" == "true" && ! -f "${ASSETS_CAR_PATH}" ]]; then
+    echo "Error: --require-native-icon specified, but ${ASSETS_CAR_PATH} is missing." >&2
+    exit 1
+fi
 EXEC_UUID="$(dwarfdump --uuid "${RELOCATED_EXEC}" | awk '{print $2; exit}')"
 EXEC_SHA256="$(shasum -a 256 "${RELOCATED_EXEC}" | awk '{print $1}')"
 DYLIB_UUID="$(dwarfdump --uuid "${RELOCATED_DYLIB}" | awk '{print $2; exit}')"

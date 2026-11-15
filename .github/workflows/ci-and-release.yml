@@ -183,6 +183,7 @@ jobs:
             --signing-mode adhoc \
             --dmg \
             --require-liquid-glass \
+            --require-native-icon \
             --version "${{ steps.mode.outputs.version }}" \
             --build-number "${GITHUB_RUN_NUMBER}" \
             --commit "${GITHUB_SHA::7}" \
@@ -194,6 +195,7 @@ jobs:
           set -euo pipefail
           ./scripts/verify-dmg.sh \
             --require-liquid-glass \
+            --require-native-icon \
             --isolate-repo-build-dirs \
             "${RUNNER_TEMP}/dist/${{ steps.mode.outputs.archive_name }}.dmg"
 

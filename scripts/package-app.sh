@@ -17,6 +17,7 @@ SIGNING_MODE="adhoc"
 CREATE_DMG="false"
 SKIP_BRIDGE_BUILD="false"
 REQUIRE_LIQUID_GLASS="false"
+REQUIRE_NATIVE_ICON="false"
 OUTPUT_DIR="${APP_DIR}/.build"
 ARCHIVE_NAME=""
 
@@ -35,6 +36,7 @@ Options:
   --output-dir <path>        Directory for .app and .dmg outputs. Default: App/.build
   --skip-bridge-build        Reuse existing Core/target/release/liblucidsql_core.dylib and UniFFI bindings
   --require-liquid-glass     Verify SDK >= 26 and compiled Liquid Glass symbols in LucidSQLApp
+  --require-native-icon      Require xcrun actool to compile Assets/AppIcon/LucidSQL.icon into Assets.car
   -h, --help                 Show this help
 EOF
 }
@@ -80,6 +82,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --require-liquid-glass)
             REQUIRE_LIQUID_GLASS="true"
+            shift
+            ;;
+        --require-native-icon)
+            REQUIRE_NATIVE_ICON="true"
             shift
             ;;
         -h|--help)
@@ -194,6 +200,54 @@ cp -f "${BIN_PATH}" "${BUNDLE_EXEC}"
 cp -f "${DYLIB_PATH}" "${BUNDLE_DYLIB}"
 chmod 755 "${BUNDLE_EXEC}" "${BUNDLE_DYLIB}"
 
+ICON_SOURCE_DIR="${ROOT_DIR}/Assets/AppIcon/LucidSQL.icon"
+FALLBACK_ICNS_PATH="${ROOT_DIR}/Assets/AppIcon/AppIcon.icns"
+if [[ ! -f "${FALLBACK_ICNS_PATH}" ]]; then
+    echo "Error: fallback app icon not found at ${FALLBACK_ICNS_PATH}" >&2
+    exit 1
+fi
+cp -f "${FALLBACK_ICNS_PATH}" "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns"
+
+ACTOOL_BIN=""
+if ACTOOL_BIN="$(xcrun --find actool 2>/dev/null)" && [[ -x "${ACTOOL_BIN}" ]]; then
+    if [[ ! -d "${ICON_SOURCE_DIR}" ]]; then
+        echo "Error: native icon source not found at ${ICON_SOURCE_DIR}" >&2
+        exit 1
+    fi
+    echo "Compiling native layered app icon with actool (${ACTOOL_BIN})..."
+    PARTIAL_ICON_PLIST="$(mktemp -t lucidsql-icon-plist)"
+    if "${ACTOOL_BIN}" "${ICON_SOURCE_DIR}" \
+        --compile "${BUNDLE_DIR}/Contents/Resources" \
+        --app-icon LucidSQL \
+        --platform macosx \
+        --target-device mac \
+        --minimum-deployment-target 14.0 \
+        --output-partial-info-plist "${PARTIAL_ICON_PLIST}"; then
+        rm -f "${PARTIAL_ICON_PLIST}"
+        if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/Assets.car" ]]; then
+            echo "Error: actool completed without producing Contents/Resources/Assets.car" >&2
+            exit 1
+        fi
+        # Ensure high-res custom fallback .icns remains present if actool only emitted Assets.car
+        if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns" ]]; then
+            cp -f "${FALLBACK_ICNS_PATH}" "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns"
+        fi
+    else
+        rm -f "${PARTIAL_ICON_PLIST}"
+        if [[ "${REQUIRE_NATIVE_ICON}" == "true" ]]; then
+            echo "Error: actool failed to compile ${ICON_SOURCE_DIR}" >&2
+            exit 1
+        fi
+        echo "Warning: actool failed; keeping fallback LucidSQL.icns without Assets.car." >&2
+    fi
+else
+    if [[ "${REQUIRE_NATIVE_ICON}" == "true" ]]; then
+        echo "Error: --require-native-icon requested, but xcrun actool was not found (Xcode required)." >&2
+        exit 1
+    fi
+    echo "Warning: xcrun actool not found (CommandLineTools only); using fallback LucidSQL.icns without Assets.car." >&2
+fi
+
 echo "=== 4. Rewriting Mach-O Install Names & RPATHs (Pre-Sign) ==="
 install_name_tool -id "@rpath/liblucidsql_core.dylib" "${BUNDLE_DYLIB}"
 
@@ -230,6 +284,10 @@ cat <<EOF > "${BUNDLE_DIR}/Contents/Info.plist"
     <string>LucidSQL</string>
     <key>CFBundleExecutable</key>
     <string>LucidSQLApp</string>
+    <key>CFBundleIconFile</key>
+    <string>LucidSQL</string>
+    <key>CFBundleIconName</key>
+    <string>LucidSQL</string>
     <key>CFBundleIdentifier</key>
     <string>com.lucidsql.LucidSQL</string>
     <key>CFBundleName</key>
@@ -289,32 +347,97 @@ if [[ "${CREATE_DMG}" == "true" ]]; then
     echo "=== 7. Creating Versioned arm64 DMG & SHA-256 Checksum ==="
     DMG_PATH="${OUTPUT_DIR}/${ARCHIVE_NAME}.dmg"
     DMG_STAGING="${OUTPUT_DIR}/.dmg-staging-${ARCHIVE_NAME}"
-    rm -rf "${DMG_STAGING}" "${DMG_PATH}" "${DMG_PATH}.sha256"
-    mkdir -p "${DMG_STAGING}"
+    DMG_RW_PATH="${OUTPUT_DIR}/.${ARCHIVE_NAME}-rw.dmg"
+    DMG_RW_MOUNT="$(mktemp -d "${TMPDIR:-/tmp}/lucidsql-dmg-mount.XXXXXX")"
+    DMG_BG_SRC="${ROOT_DIR}/Assets/DMG/dmg-background@2x.png"
+    DMG_VOLICON_SRC="${ROOT_DIR}/Assets/AppIcon/AppIcon.icns"
+
+    if [[ ! -f "${DMG_BG_SRC}" ]]; then
+        echo "Error: DMG background artwork not found at ${DMG_BG_SRC}" >&2
+        exit 1
+    fi
+    if [[ ! -f "${DMG_VOLICON_SRC}" ]]; then
+        echo "Error: DMG volume icon not found at ${DMG_VOLICON_SRC}" >&2
+        exit 1
+    fi
+
+    cleanup_dmg_build() {
+        if [[ -n "${DMG_RW_MOUNT:-}" ]] && mount | grep -q " on ${DMG_RW_MOUNT} "; then
+            hdiutil detach "${DMG_RW_MOUNT}" -force >/dev/null 2>&1 || true
+        fi
+        rm -rf "${DMG_STAGING:-}" "${DMG_RW_PATH:-}" "${DMG_RW_MOUNT:-}"
+    }
+    trap cleanup_dmg_build EXIT
+
+    rm -rf "${DMG_STAGING}" "${DMG_RW_PATH}" "${DMG_PATH}" "${DMG_PATH}.sha256"
+    mkdir -p "${DMG_STAGING}/.background"
 
     ditto "${BUNDLE_DIR}" "${DMG_STAGING}/LucidSQL.app"
     ln -s /Applications "${DMG_STAGING}/Applications"
+    cp -f "${DMG_BG_SRC}" "${DMG_STAGING}/.background/bg.png"
+    cp -f "${DMG_VOLICON_SRC}" "${DMG_STAGING}/.VolumeIcon.icns"
+
+    python3 "${SCRIPT_DIR}/lib/generate_dmg_ds_store.py" \
+        --output "${DMG_STAGING}/.DS_Store" \
+        --volume-name "LucidSQL" \
+        --background-rel ".background/bg.png"
 
     HDIUTIL_OK="false"
     for attempt in 1 2 3; do
         if hdiutil create \
             -volname "LucidSQL" \
             -srcfolder "${DMG_STAGING}" \
+            -fs HFS+ \
             -ov \
-            -format UDZO \
-            -imagekey zlib-level=9 \
-            "${DMG_PATH}"; then
+            -format UDRW \
+            "${DMG_RW_PATH}"; then
             HDIUTIL_OK="true"
             break
         fi
-        echo "hdiutil create attempt ${attempt} failed; retrying..." >&2
+        echo "hdiutil create (UDRW) attempt ${attempt} failed; retrying..." >&2
+        rm -f "${DMG_RW_PATH}"
+        sleep 2
+    done
+
+    if [[ "${HDIUTIL_OK}" != "true" ]]; then
+        echo "Error: Failed to create read-write staging DMG at ${DMG_RW_PATH}" >&2
+        exit 1
+    fi
+
+    # Apply Finder custom volume icon bit and invisible flags on the mounted HFS+ root.
+    if hdiutil attach "${DMG_RW_PATH}" -nobrowse -noverify -mountpoint "${DMG_RW_MOUNT}"; then
+        if command -v SetFile >/dev/null 2>&1; then
+            SetFile -a C "${DMG_RW_MOUNT}"
+            SetFile -a V "${DMG_RW_MOUNT}/.background" "${DMG_RW_MOUNT}/.background/bg.png" "${DMG_RW_MOUNT}/.VolumeIcon.icns" || true
+        else
+            echo "Warning: SetFile not found; custom volume icon attribute was not set." >&2
+        fi
+        sync
+        hdiutil detach "${DMG_RW_MOUNT}" -quiet || hdiutil detach "${DMG_RW_MOUNT}" -force
+    else
+        echo "Error: Failed to mount ${DMG_RW_PATH} to configure Finder volume attributes." >&2
+        exit 1
+    fi
+
+    HDIUTIL_CONVERT_OK="false"
+    for attempt in 1 2 3; do
+        if hdiutil convert "${DMG_RW_PATH}" \
+            -format UDZO \
+            -imagekey zlib-level=9 \
+            -ov \
+            -o "${DMG_PATH}"; then
+            HDIUTIL_CONVERT_OK="true"
+            break
+        fi
+        echo "hdiutil convert (UDZO) attempt ${attempt} failed; retrying..." >&2
         rm -f "${DMG_PATH}"
         sleep 2
     done
 
-    rm -rf "${DMG_STAGING}"
-    if [[ "${HDIUTIL_OK}" != "true" ]]; then
-        echo "Error: Failed to create DMG at ${DMG_PATH}" >&2
+    cleanup_dmg_build
+    trap - EXIT
+    if [[ "${HDIUTIL_CONVERT_OK}" != "true" ]]; then
+        echo "Error: Failed to compress DMG at ${DMG_PATH}" >&2
         exit 1
     fi
 
