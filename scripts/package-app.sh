@@ -228,10 +228,8 @@ if ACTOOL_BIN="$(xcrun --find actool 2>/dev/null)" && [[ -x "${ACTOOL_BIN}" ]]; 
             echo "Error: actool completed without producing Contents/Resources/Assets.car" >&2
             exit 1
         fi
-        # Ensure high-res custom fallback .icns remains present if actool only emitted Assets.car
-        if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns" ]]; then
-            cp -f "${FALLBACK_ICNS_PATH}" "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns"
-        fi
+        # Always keep full 16px-1024px custom fallback .icns alongside Assets.car (actool emits <=256px .icns).
+        cp -f "${FALLBACK_ICNS_PATH}" "${BUNDLE_DIR}/Contents/Resources/LucidSQL.icns"
     else
         rm -f "${PARTIAL_ICON_PLIST}"
         if [[ "${REQUIRE_NATIVE_ICON}" == "true" ]]; then
