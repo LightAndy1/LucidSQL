@@ -10,8 +10,6 @@ struct Metrics {
     static let heightPt: CGFloat = 420
     static let leftIconCenter = CGPoint(x: 190, y: 170)
     static let rightIconCenter = CGPoint(x: 470, y: 170)
-    static let padSize: CGFloat = 130
-    static let padCornerRadius: CGFloat = 26
 }
 
 func cgColor(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1.0) -> CGColor {
@@ -38,70 +36,6 @@ func makeBitmapContext(scale: CGFloat) -> CGContext? {
     ctx.translateBy(x: 0, y: CGFloat(pixelH))
     ctx.scaleBy(x: scale, y: -scale)
     return ctx
-}
-
-func drawGlassStagePad(in ctx: CGContext, center: CGPoint) {
-    let rect = CGRect(
-        x: center.x - Metrics.padSize / 2,
-        y: center.y - Metrics.padSize / 2,
-        width: Metrics.padSize,
-        height: Metrics.padSize
-    )
-    let path = CGPath(
-        roundedRect: rect,
-        cornerWidth: Metrics.padCornerRadius,
-        cornerHeight: Metrics.padCornerRadius,
-        transform: nil
-    )
-
-    // Subtle soft ambient drop shadow behind each icon stage card.
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: 8),
-        blur: 22,
-        color: cgColor(15, 55, 110, 0.085)
-    )
-    ctx.addPath(path)
-    ctx.setFillColor(cgColor(255, 255, 255, 0.72))
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // Interior frosted glass gradient (top-left luminous -> bottom-right cool frost).
-    ctx.saveGState()
-    ctx.addPath(path)
-    ctx.clip()
-    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-    let padGrad = CGGradient(
-        colorsSpace: cs,
-        colors: [
-            cgColor(255, 255, 255, 0.90),
-            cgColor(240, 248, 255, 0.70),
-            cgColor(225, 240, 253, 0.62)
-        ] as CFArray,
-        locations: [0.0, 0.55, 1.0]
-    )!
-    ctx.drawLinearGradient(
-        padGrad,
-        start: CGPoint(x: rect.minX, y: rect.minY),
-        end: CGPoint(x: rect.maxX, y: rect.maxY),
-        options: []
-    )
-    ctx.restoreGState()
-
-    // Crisp specular glass rim stroke.
-    ctx.saveGState()
-    let strokeRect = rect.insetBy(dx: 0.5, dy: 0.5)
-    let strokePath = CGPath(
-        roundedRect: strokeRect,
-        cornerWidth: Metrics.padCornerRadius - 0.5,
-        cornerHeight: Metrics.padCornerRadius - 0.5,
-        transform: nil
-    )
-    ctx.addPath(strokePath)
-    ctx.setLineWidth(1.0)
-    ctx.setStrokeColor(cgColor(148, 196, 238, 0.62))
-    ctx.strokePath()
-    ctx.restoreGState()
 }
 
 func drawDirectionalArrow(in ctx: CGContext) {
@@ -201,12 +135,12 @@ func renderBackground(scale: CGFloat, outputURL: URL) throws {
         options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
     )
 
-    // 2. Soft ambient cyan/azure glass bloom (large soft startRadius to avoid sharp center artifact).
+    // 2. Soft ambient cyan/azure glass bloom (startRadius: 0 prevents unfilled inner disc).
     let topGlow = CGGradient(
         colorsSpace: cs,
         colors: [
-            cgColor(92, 192, 248, 0.22),
-            cgColor(125, 210, 252, 0.10),
+            cgColor(92, 192, 248, 0.20),
+            cgColor(125, 210, 252, 0.09),
             cgColor(125, 210, 252, 0.0)
         ] as CFArray,
         locations: [0.0, 0.45, 1.0]
@@ -214,16 +148,16 @@ func renderBackground(scale: CGFloat, outputURL: URL) throws {
     ctx.drawRadialGradient(
         topGlow,
         startCenter: CGPoint(x: 210, y: 120),
-        startRadius: 12,
+        startRadius: 0,
         endCenter: CGPoint(x: 210, y: 120),
         endRadius: 340,
-        options: []
+        options: [.drawsBeforeStartLocation]
     )
 
     let rightGlow = CGGradient(
         colorsSpace: cs,
         colors: [
-            cgColor(56, 146, 232, 0.14),
+            cgColor(56, 146, 232, 0.13),
             cgColor(56, 146, 232, 0.0)
         ] as CFArray,
         locations: [0.0, 1.0]
@@ -231,10 +165,10 @@ func renderBackground(scale: CGFloat, outputURL: URL) throws {
     ctx.drawRadialGradient(
         rightGlow,
         startCenter: CGPoint(x: 500, y: 240),
-        startRadius: 10,
+        startRadius: 0,
         endCenter: CGPoint(x: 500, y: 240),
         endRadius: 290,
-        options: []
+        options: [.drawsBeforeStartLocation]
     )
 
     // Subtle hairline top sheen.
@@ -243,14 +177,10 @@ func renderBackground(scale: CGFloat, outputURL: URL) throws {
     ctx.fill(CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: 1.0))
     ctx.restoreGState()
 
-    // 3. Two frosted glass stage cards behind the icon artwork (leaving labels cleanly underneath).
-    drawGlassStagePad(in: ctx, center: Metrics.leftIconCenter)
-    drawGlassStagePad(in: ctx, center: Metrics.rightIconCenter)
-
-    // 4. Restrained directional arrow.
+    // 3. Restrained directional arrow (no decorative card borders near filenames).
     drawDirectionalArrow(in: ctx)
 
-    // 5. Single concise instruction line.
+    // 4. Single concise instruction line.
     drawInstructionText(in: ctx)
 
     guard let image = ctx.makeImage() else {
