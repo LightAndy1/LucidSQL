@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="midWallGrad" x1="256" y1="534" x2="768" y2="534" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67E8F9" stop-opacity="0.74"/>
+      <stop offset="20%" stop-color="#22D3EE" stop-opacity="0.76"/>
+      <stop offset="54%" stop-color="#0284C7" stop-opacity="0.80"/>
+      <stop offset="86%" stop-color="#0369A1" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#7DD3FC" stop-opacity="0.72"/>
+    </linearGradient>
+    <linearGradient id="midShelfGrad" x1="512" y1="396" x2="512" y2="548" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.24"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.50"/>
+    </linearGradient>
+    <linearGradient id="midRimStroke" x1="256" y1="472" x2="768" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#CFFAFE" stop-opacity="0.86"/>
+      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.54"/>
+      <stop offset="100%" stop-color="#E0F2FE" stop-opacity="0.76"/>
+    </linearGradient>
+  </defs>
+  <!-- Middle cylinder outer body -->
+  <path d="M 256 472 A 256 76 0 0 0 768 472 L 768 564 A 256 76 0 0 1 256 564 Z"
+        fill="url(#midWallGrad)" stroke="url(#midRimStroke)" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Middle cylinder upper glass surface -->
+  <ellipse cx="512" cy="472" rx="256" ry="76" fill="url(#midShelfGrad)" stroke="#BAE6FD" stroke-opacity="0.64" stroke-width="4"/>
+</svg>

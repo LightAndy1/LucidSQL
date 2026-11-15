@@ -1,0 +1,164 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.06667,0.23137,0.54118,1.00000",
+      "srgb:0.01569,0.05490,0.17255,1.00000"
+    ],
+    "orientation": {
+      "start": { "x": 0.25, "y": 0.0 },
+      "stop": { "x": 0.75, "y": 1.0 }
+    }
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.03922,0.12549,0.32941,1.00000",
+          "srgb:0.01176,0.02745,0.09020,1.00000"
+        ],
+        "orientation": {
+          "start": { "x": 0.25, "y": 0.0 },
+          "stop": { "x": 0.75, "y": 1.0 }
+        }
+      }
+    },
+    {
+      "appearance": "tinted",
+      "value": {
+        "automatic-gradient": "srgb:0.20000,0.22353,0.26275,1.00000"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "ambient-glow",
+      "layers": [
+        {
+          "name": "ambient-glow",
+          "image-name": "01-ambient-glow.svg",
+          "glass": false,
+          "opacity-specializations": [
+            { "value": 0.85 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.0 }
+          ],
+          "hidden-specializations": [
+            { "value": false },
+            { "appearance": "tinted", "value": true }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0.0
+      }
+    },
+    {
+      "name": "database-cylinder",
+      "layers": [
+        {
+          "name": "cylinder-bottom",
+          "image-name": "02-cylinder-bottom.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.86275,0.89020,0.92549,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.58 }
+          ]
+        },
+        {
+          "name": "cylinder-middle",
+          "image-name": "03-cylinder-middle.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.92157,0.94118,0.96471,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.76 }
+          ]
+        },
+        {
+          "name": "cylinder-top",
+          "image-name": "04-cylinder-top.svg",
+          "glass": true,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.97647,0.98431,0.99608,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 1.0 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 0.96 }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.45
+      },
+      "specular": true
+    },
+    {
+      "name": "specular-highlights",
+      "layers": [
+        {
+          "name": "rim-highlights",
+          "image-name": "05-specular-highlights.svg",
+          "glass": false,
+          "fill-specializations": [
+            { "value": "none" },
+            { "appearance": "dark", "value": "none" },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "opacity-specializations": [
+            { "value": 0.9 },
+            { "appearance": "dark", "value": 1.0 },
+            { "appearance": "tinted", "value": 1.0 }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0.0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

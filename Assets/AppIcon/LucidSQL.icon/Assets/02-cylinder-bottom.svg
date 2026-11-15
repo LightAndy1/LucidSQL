@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bottomWallGrad" x1="256" y1="690" x2="768" y2="690" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.62"/>
+      <stop offset="18%" stop-color="#0EA5E9" stop-opacity="0.72"/>
+      <stop offset="52%" stop-color="#0369A1" stop-opacity="0.80"/>
+      <stop offset="84%" stop-color="#1D4ED8" stop-opacity="0.82"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.68"/>
+    </linearGradient>
+    <linearGradient id="bottomShelfGrad" x1="512" y1="552" x2="512" y2="704" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284C7" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.46"/>
+    </linearGradient>
+    <linearGradient id="bottomRimStroke" x1="256" y1="628" x2="768" y2="796" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A5F3FC" stop-opacity="0.74"/>
+      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.46"/>
+      <stop offset="100%" stop-color="#BAE6FD" stop-opacity="0.68"/>
+    </linearGradient>
+  </defs>
+  <!-- Bottom cylinder outer body -->
+  <path d="M 256 628 A 256 76 0 0 0 768 628 L 768 720 A 256 76 0 0 1 256 720 Z"
+        fill="url(#bottomWallGrad)" stroke="url(#bottomRimStroke)" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Bottom cylinder upper glass surface -->
+  <ellipse cx="512" cy="628" rx="256" ry="76" fill="url(#bottomShelfGrad)" stroke="#7DD3FC" stroke-opacity="0.54" stroke-width="4"/>
+</svg>
