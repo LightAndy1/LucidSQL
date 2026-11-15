@@ -1207,7 +1207,10 @@ struct TableDataViewModelTests {
 
         // Attempting to change search, page size, jump page, or dismiss with active search triggers pending-edit alert
         vm.updateSearchInput("done_", config: config)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        for _ in 0..<60 {
+            if vm.showingUnsavedChangesAlert { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
         #expect(vm.showingUnsavedChangesAlert == true)
         vm.cancelNavigation()
         #expect(vm.hasPendingChanges == true)

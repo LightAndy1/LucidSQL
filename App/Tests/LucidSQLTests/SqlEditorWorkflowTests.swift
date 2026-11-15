@@ -112,12 +112,12 @@ struct SqlEditorWorkflowTests {
         let config = getLocalConfig()
         let queryId = UUID().uuidString
 
-        // Start a 3-second sleep query in the background
+        // Start a 5-second sleep query in the background
         let queryTask = Task { () -> Result<QueryResult, Error> in
             do {
                 let res = try await execute_query(
                     config: config,
-                    sql: "SELECT pg_sleep(3);",
+                    sql: "SELECT pg_sleep(5);",
                     queryId: queryId
                 )
                 return .success(res)
@@ -126,11 +126,13 @@ struct SqlEditorWorkflowTests {
             }
         }
 
-        // Give the query 200ms to reach PostgreSQL
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        // Issue cancellation
-        let cancelled = try await cancel_query(queryId: queryId)
+        // Wait until the query registers in Core active queries before cancelling (avoids fixed-sleep races on loaded CI runners)
+        var cancelled = false
+        for _ in 0..<25 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            cancelled = try await cancel_query(queryId: queryId)
+            if cancelled { break }
+        }
         #expect(cancelled == true)
 
         let result = await queryTask.value
