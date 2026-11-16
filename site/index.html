@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#050E22">
+  <meta name="description" content="LucidSQL is a fast, native macOS PostgreSQL client built with SwiftUI, AppKit, and Rust. Virtualized grid, xmin-guarded edits, and isolated SQL tabs.">
+  <link rel="icon" type="image/png" href="assets/AppIcon/LucidSQL-1024.png">
+  <title>LucidSQL: Native macOS PostgreSQL Client</title>
+  <style>
+    :root {
+      --bg: #050E22;
+      --glass: rgba(10, 26, 62, 0.54);
+      --glass-strong: rgba(13, 33, 76, 0.68);
+      --ink: #F2F7FD;
+      --ink-2: #AFC7E3;
+      --ink-3: #7E9BC0;
+      --border: rgba(184, 238, 251, 0.13);
+      --border-hover: rgba(184, 238, 251, 0.28);
+      --cyan: #48C0F0;
+      --cyan-hover: #6CD0F6;
+      --cyan-ink: #04142E;
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+      --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    ::selection {
+      background: rgba(72, 192, 240, 0.25);
+      color: #FFFFFF;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      margin: 0;
+      background-color: var(--bg);
+      color: var(--ink);
+      font-family: var(--font-sans);
+      font-size: 16px;
+      line-height: 1.55;
+      font-variant-numeric: tabular-nums;
+      overflow-x: clip;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 28px;
+    }
+
+    /* Floating Liquid Glass Pill Navbar */
+    .nav-shell {
+      position: sticky;
+      top: 14px;
+      z-index: 30;
+      padding: 0 20px;
+      pointer-events: none;
+    }
+
+    header.nav-pill {
+      pointer-events: auto;
+      max-width: 820px;
+      margin: 0 auto;
+      height: 52px;
+      padding: 0 8px 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      border-radius: 999px;
+      background: rgba(8, 22, 52, 0.62);
+      backdrop-filter: blur(26px) saturate(180%);
+      -webkit-backdrop-filter: blur(26px) saturate(180%);
+      border: 1px solid var(--border);
+      box-shadow:
+        inset 0 0.5px 0 rgba(255, 255, 255, 0.14),
+        0 12px 32px -12px rgba(0, 0, 0, 0.65);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      text-decoration: none;
+      font-weight: 650;
+      font-size: 14.5px;
+      letter-spacing: -0.02em;
+    }
+
+    .brand img {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13.5px;
+      color: var(--ink-2);
+    }
+
+    .nav-links a {
+      padding: 6px 12px;
+      border-radius: 999px;
+      text-decoration: none;
+      transition: background 0.16s ease, color 0.16s ease;
+    }
+
+    .nav-links a:hover {
+      color: #FFFFFF;
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .nav-links .nav-btn {
+      padding: 7px 15px;
+      background: var(--cyan);
+      color: var(--cyan-ink);
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+      transition: background 0.16s ease, transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .nav-links .nav-btn:hover {
+      background: var(--cyan-hover);
+      color: var(--cyan-ink);
+    }
+
+    .nav-links .nav-btn:active {
+      transform: scale(0.97);
+    }
+
+    /* Hero */
+    .hero {
+      position: relative;
+      overflow: hidden;
+      margin-top: -66px;
+      padding: 138px 0 56px;
+      text-align: center;
+    }
+
+    #hero-shader {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      pointer-events: none;
+      z-index: 0;
+      -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 70%, transparent 100%);
+      mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.7) 70%, transparent 100%);
+    }
+
+    .hero > .wrap {
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero-icon {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 24px;
+      display: block;
+      filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.5));
+    }
+
+    h1 {
+      margin: 0 auto 16px;
+      max-width: 17ch;
+      font-size: clamp(2.6rem, 5.2vw, 4rem);
+      line-height: 1.03;
+      letter-spacing: -0.04em;
+      font-weight: 700;
+      text-wrap: balance;
+    }
+
+    .hero-sub {
+      margin: 0 auto 30px;
+      max-width: 50ch;
+      font-size: 18px;
+      line-height: 1.5;
+      color: var(--ink-2);
+    }
+
+    .hero-sub code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      color: var(--ink);
+    }
+
+    .cta-row {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    /* Modern macOS Liquid Glass Buttons */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 44px;
+      padding: 0 22px;
+      background: var(--cyan);
+      color: var(--cyan-ink);
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 14.5px;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+      box-shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.45);
+      transition: background 0.18s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .btn-primary:hover {
+      background: var(--cyan-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+
+    .btn-glass {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 44px;
+      padding: 0 22px;
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      color: var(--ink);
+      border: 1px solid rgba(184, 238, 251, 0.20);
+      border-radius: 999px;
+      font-weight: 500;
+      font-size: 14.5px;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+      box-shadow:
+        inset 0 0.5px 0 rgba(255, 255, 255, 0.18),
+        0 4px 16px -4px rgba(0, 0, 0, 0.45);
+      transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .btn-glass:hover {
+      background: rgba(255, 255, 255, 0.11);
+      border-color: rgba(184, 238, 251, 0.34);
+      transform: translateY(-1px);
+    }
+
+    .btn-glass:active {
+      transform: scale(0.98);
+    }
+
+    .hero-meta {
+      margin: 0;
+      font-size: 13px;
+      color: var(--ink-3);
+    }
+
+    /* Main Screenshot */
+    .stage {
+      padding: 8px 0 84px;
+    }
+
+    .frame {
+      background: var(--glass);
+      backdrop-filter: blur(20px) saturate(150%);
+      -webkit-backdrop-filter: blur(20px) saturate(150%);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow:
+        inset 0 0.5px 0 rgba(255, 255, 255, 0.14),
+        0 32px 72px -24px rgba(0, 0, 0, 0.8);
+    }
+
+    .frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    /* Alternating Showcase */
+    .section {
+      padding: 84px 0;
+      border-top: 1px solid rgba(184, 238, 251, 0.08);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1.2fr;
+      gap: 48px;
+      align-items: center;
+    }
+
+    .row > *,
+    .install-card > * {
+      min-width: 0;
+    }
+
+    .row + .row {
+      margin-top: 84px;
+      padding-top: 84px;
+      border-top: 1px solid rgba(184, 238, 251, 0.08);
+    }
+
+    .row.flip .row-text {
+      order: 2;
+    }
+
+    .row.flip .row-media {
+      order: 1;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: clamp(1.7rem, 3vw, 2.2rem);
+      letter-spacing: -0.035em;
+      line-height: 1.12;
+      font-weight: 700;
+    }
+
+    .row-text p {
+      margin: 0 0 22px;
+      color: var(--ink-2);
+      max-width: 45ch;
+    }
+
+    .row-text code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      color: var(--ink);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .chips li {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 6px 13px;
+      background: rgba(255, 255, 255, 0.045);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--ink-2);
+      box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+    }
+
+    .glass-panel {
+      background: var(--glass);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow:
+        inset 0 0.5px 0 rgba(255, 255, 255, 0.14),
+        0 20px 44px -20px rgba(0, 0, 0, 0.65);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      padding: 12px 18px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--ink-2);
+    }
+
+    .copy-btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--ink-2);
+      font-family: var(--font-sans);
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+    }
+
+    .copy-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: var(--border-hover);
+      color: #FFFFFF;
+    }
+
+    .panel-head .live {
+      color: var(--cyan);
+    }
+
+    pre {
+      margin: 0;
+      padding: 20px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--ink);
+      overflow-x: auto;
+    }
+
+    .kw {
+      color: var(--cyan);
+      font-weight: 600;
+    }
+
+    .dim {
+      color: var(--ink-3);
+    }
+
+    /* Install Card */
+    .install-card {
+      background: var(--glass);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 36px;
+      display: grid;
+      grid-template-columns: 1fr 1.1fr;
+      gap: 36px;
+      align-items: center;
+      box-shadow:
+        inset 0 0.5px 0 rgba(255, 255, 255, 0.14),
+        0 24px 52px -24px rgba(0, 0, 0, 0.7);
+    }
+
+    .install-card p {
+      margin: 0 0 20px;
+      color: var(--ink-2);
+      font-size: 15px;
+    }
+
+    .install-card code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      color: var(--ink);
+    }
+
+    footer {
+      border-top: 1px solid rgba(184, 238, 251, 0.08);
+      padding: 30px 0 44px;
+      font-size: 13.5px;
+      color: var(--ink-3);
+    }
+
+    .foot {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .foot-links {
+      display: flex;
+      gap: 20px;
+    }
+
+    .foot-links a {
+      text-decoration: none;
+    }
+
+    .foot-links a:hover {
+      color: #FFFFFF;
+    }
+
+    @media (max-width: 860px) {
+      .row,
+      .install-card {
+        grid-template-columns: 1fr;
+        gap: 28px;
+      }
+
+      .row.flip .row-text,
+      .row.flip .row-media {
+        order: initial;
+      }
+
+      .nav-links a:not(.nav-btn) {
+        display: none;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .wrap {
+        padding: 0 18px;
+      }
+
+      .nav-shell {
+        top: 10px;
+        padding: 0 14px;
+      }
+
+      .hero {
+        padding: 108px 0 40px;
+      }
+
+      .hero-icon {
+        width: 68px;
+        height: 68px;
+        margin-bottom: 20px;
+      }
+
+      .hero-sub {
+        font-size: 16.5px;
+      }
+
+      .cta-row {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .btn-primary,
+      .btn-glass {
+        justify-content: center;
+        width: 100%;
+      }
+
+      .stage {
+        padding: 4px 0 56px;
+      }
+
+      .section {
+        padding: 56px 0;
+      }
+
+      .row + .row {
+        margin-top: 56px;
+        padding-top: 56px;
+      }
+
+      .install-card {
+        padding: 24px;
+        border-radius: 18px;
+      }
+
+      pre {
+        padding: 16px;
+        font-size: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="nav-shell">
+    <header class="nav-pill">
+      <a class="brand" href="#">
+        <img src="assets/AppIcon/LucidSQL-1024.png" alt="LucidSQL icon">
+        <span>LucidSQL</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#workflow">Workflow</a>
+        <a href="#build">Install</a>
+        <a href="https://github.com/LightAndy1/LucidSQL">GitHub</a>
+        <a class="nav-btn" href="#build">Get .dmg</a>
+      </nav>
+    </header>
+  </div>
+
+  <main>
+    <section class="hero" style="border-top: none;">
+      <canvas id="hero-shader" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <img class="hero-icon" src="assets/AppIcon/LucidSQL-1024.png" alt="LucidSQL app icon">
+        <h1>PostgreSQL at native macOS speed.</h1>
+        <p class="hero-sub">
+          AppKit virtualized grid, dedicated SQL session tabs, and a Rust <code>tokio-postgres</code> engine, built for Apple Silicon with zero telemetry.
+        </p>
+        <div class="cta-row">
+          <a class="btn-primary" href="https://github.com/LightAndy1/LucidSQL/actions/workflows/ci-and-release.yml">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download CI .dmg (arm64)
+          </a>
+          <a class="btn-glass" href="https://github.com/LightAndy1/LucidSQL">
+            View Source on GitHub
+          </a>
+        </div>
+        <p class="hero-meta">macOS 14.0+ · Keychain credentials · AGPL-3.0-only</p>
+      </div>
+    </section>
+
+    <div class="stage">
+      <div class="wrap">
+        <div class="frame">
+          <img src="assets/Screenshots/lucidsql-workspace.png" alt="LucidSQL workspace with schema sidebar and orders table grid">
+        </div>
+      </div>
+    </div>
+
+    <section class="section" id="workflow">
+      <div class="wrap">
+        <div class="row">
+          <div class="row-text">
+            <h2>Stage edits locally. Guard every commit with xmin.</h2>
+            <p>
+              Type in the grid without holding open transactions. Review your diff and apply atomically. Stale rows roll back immediately while keeping your edits intact.
+            </p>
+            <ul class="chips">
+              <li>⌥⌘N NULL vs ""</li>
+              <li>BEGIN READ ONLY</li>
+              <li>Exact numerics</li>
+            </ul>
+          </div>
+          <div class="row-media">
+            <div class="glass-panel">
+              <div class="panel-head">
+                <span>apply-changes.sql</span>
+                <span class="live">atomic · xmin check</span>
+              </div>
+              <pre><code><span class="kw">BEGIN</span>;
+<span class="kw">UPDATE</span> public.orders
+   <span class="kw">SET</span> status = 'fulfilled', note = <span class="kw">NULL</span>
+ <span class="kw">WHERE</span> id = $1 <span class="kw">AND</span> xmin = $2
+ <span class="kw">RETURNING</span> xmin;
+<span class="dim">-- 0 rows affected → ROLLBACK</span>
+<span class="kw">COMMIT</span>;</code></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="row flip">
+          <div class="row-text">
+            <h2>One PostgreSQL session per SQL tab.</h2>
+            <p>
+              Run queries with ⌘↩ in an isolated connection so temp tables and <code>SET search_path</code> stay predictable, with live cancellation and close-tab rollback prompts.
+            </p>
+            <ul class="chips">
+              <li>⌘↩ Execute</li>
+              <li>⌘F Literal search</li>
+              <li>REPEATABLE READ CSV</li>
+            </ul>
+          </div>
+          <div class="row-media">
+            <div class="frame">
+              <img src="assets/Screenshots/lucidsql-sql-editor.png" alt="LucidSQL SQL Editor executing a join query with typed results" loading="lazy">
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="build">
+      <div class="wrap">
+        <div class="install-card">
+          <div>
+            <h2>Download or build from source.</h2>
+            <p>
+              Signed development <code>.dmg</code> artifacts and <code>.sha256</code> checksums are produced on GitHub Actions. Ad-hoc signed builds require <strong>Open Anyway</strong> in System Settings → Privacy &amp; Security on first launch.
+            </p>
+            <a class="btn-primary" href="https://github.com/LightAndy1/LucidSQL/actions/workflows/ci-and-release.yml">
+              Open GitHub Actions Builds
+            </a>
+          </div>
+          <div class="glass-panel">
+            <div class="panel-head">
+              <span>zsh · Apple Silicon</span>
+              <button type="button" class="copy-btn" id="copy-build-cmd" aria-label="Copy build commands">Copy</button>
+            </div>
+            <pre id="build-cmd"><code>./scripts/build-rust-bridge.sh
+./tests/bridge_smoke_test.sh
+./scripts/run-app.sh</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap foot">
+      <span>LucidSQL · Zero telemetry · AGPL-3.0-only</span>
+      <div class="foot-links">
+        <a href="https://github.com/LightAndy1/LucidSQL">GitHub</a>
+        <a href="https://github.com/LightAndy1/LucidSQL/blob/main/docs/REFERENCE.md">Reference</a>
+        <a href="https://github.com/LightAndy1/LucidSQL/blob/main/LICENSE">License</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById("hero-shader");
+      if (!canvas) return;
+      const gl = canvas.getContext("webgl", { alpha: true, antialias: false, powerPreference: "low-power" });
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const resize = () => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+      };
+
+      if (!gl) {
+        const ctx = canvas.getContext("2d");
+        const draw2d = () => {
+          resize();
+          if (!ctx) return;
+          const step = 16;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "rgba(72, 192, 240, 0.22)";
+          for (let y = step / 2; y < canvas.height; y += step) {
+            for (let x = step / 2; x < canvas.width; x += step) {
+              ctx.beginPath();
+              ctx.arc(x, y, 1.3, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        };
+        window.addEventListener("resize", draw2d);
+        draw2d();
+        return;
+      }
+
+      const vsSrc = `
+        attribute vec2 a_pos;
+        void main() {
+          gl_Position = vec4(a_pos, 0.0, 1.0);
+        }
+      `;
+
+      const fsSrc = `
+        precision highp float;
+        uniform vec2 u_res;
+        uniform float u_time;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), u.x),
+            mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+            u.y
+          );
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p = rot * p * 2.02;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        float bayer4(vec2 pos) {
+          int x = int(mod(pos.x, 4.0));
+          int y = int(mod(pos.y, 4.0));
+          int idx = x + y * 4;
+          if (idx == 0) return 0.0 / 16.0;
+          if (idx == 1) return 8.0 / 16.0;
+          if (idx == 2) return 2.0 / 16.0;
+          if (idx == 3) return 10.0 / 16.0;
+          if (idx == 4) return 12.0 / 16.0;
+          if (idx == 5) return 4.0 / 16.0;
+          if (idx == 6) return 14.0 / 16.0;
+          if (idx == 7) return 6.0 / 16.0;
+          if (idx == 8) return 3.0 / 16.0;
+          if (idx == 9) return 11.0 / 16.0;
+          if (idx == 10) return 1.0 / 16.0;
+          if (idx == 11) return 9.0 / 16.0;
+          if (idx == 12) return 15.0 / 16.0;
+          if (idx == 13) return 7.0 / 16.0;
+          if (idx == 14) return 13.0 / 16.0;
+          return 5.0 / 16.0;
+        }
+
+        void main() {
+          float cell = 5.5;
+          vec2 gridCoord = floor(gl_FragCoord.xy / cell);
+          vec2 cellUv = fract(gl_FragCoord.xy / cell) - 0.5;
+          vec2 uv = (gridCoord * cell) / u_res.xy;
+          uv.x *= u_res.x / max(u_res.y, 1.0);
+
+          float t = u_time * 0.14;
+          vec2 q = vec2(fbm(uv * 2.1 + vec2(t, -t * 0.6)), fbm(uv * 2.1 + vec2(-t * 0.7, t * 0.5)));
+          float field = fbm(uv * 2.4 + q * 1.4);
+
+          vec2 center = vec2(0.5 * (u_res.x / max(u_res.y, 1.0)), 0.62);
+          float glow = exp(-dot(uv - center, uv - center) * 1.6);
+          float energy = clamp(field * 0.72 + glow * 0.36 - 0.24, 0.0, 1.0);
+
+          float threshold = bayer4(gridCoord);
+          float active = step(threshold, energy);
+
+          float dist = length(cellUv);
+          float dotMask = 1.0 - smoothstep(0.20, 0.38, dist);
+
+          vec3 colBack = vec3(0.020, 0.055, 0.133);
+          vec3 colMid  = vec3(0.063, 0.490, 0.831);
+          vec3 colCyan = vec3(0.282, 0.753, 0.941);
+          vec3 dotCol = mix(colMid, colCyan, smoothstep(0.35, 0.85, energy));
+
+          vec3 finalCol = mix(colBack, dotCol, active * dotMask * 0.56);
+          gl_FragColor = vec4(finalCol, 1.0);
+        }
+      `;
+
+      const compile = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        return s;
+      };
+
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+      gl.linkProgram(prog);
+      gl.useProgram(prog);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+      const locPos = gl.getAttribLocation(prog, "a_pos");
+      gl.enableVertexAttribArray(locPos);
+      gl.vertexAttribPointer(locPos, 2, gl.FLOAT, false, 0, 0);
+
+      const uRes = gl.getUniformLocation(prog, "u_res");
+      const uTime = gl.getUniformLocation(prog, "u_time");
+
+      resize();
+      window.addEventListener("resize", resize);
+
+      const start = performance.now();
+      const render = (now) => {
+        gl.uniform2f(uRes, canvas.width, canvas.height);
+        gl.uniform1f(uTime, reduceMotion ? 1.2 : (now - start) * 0.001);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        if (!reduceMotion) requestAnimationFrame(render);
+      };
+      requestAnimationFrame(render);
+    })();
+
+    (() => {
+      const btn = document.getElementById("copy-build-cmd");
+      const code = document.getElementById("build-cmd");
+      if (!btn || !code) return;
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(code.textContent.trim());
+          btn.textContent = "Copied";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1800);
+        } catch {
+          btn.textContent = "Select & Copy";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1800);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
