@@ -10,6 +10,12 @@
 
 <p align="center">
   <a href="https://github.com/LightAndy1/LucidSQL/actions/workflows/ci-and-release.yml"><img src="https://github.com/LightAndy1/LucidSQL/actions/workflows/ci-and-release.yml/badge.svg?branch=main" alt="macOS CI &amp; Release"></a>
+  <a href="https://github.com/LightAndy1/LucidSQL/actions/workflows/pages.yml"><img src="https://github.com/LightAndy1/LucidSQL/actions/workflows/pages.yml/badge.svg?branch=main" alt="GitHub Pages"></a>
+  <a href="https://github.com/LightAndy1/LucidSQL/releases"><img src="https://img.shields.io/github/v/release/LightAndy1/LucidSQL?include_prereleases&amp;label=release" alt="GitHub Release"></a>
+  <a href="https://github.com/LightAndy1/LucidSQL/issues"><img src="https://img.shields.io/github/issues/LightAndy1/LucidSQL" alt="GitHub Issues"></a>
+  <a href="https://github.com/LightAndy1/LucidSQL/issues/new"><img src="https://img.shields.io/badge/bugs-report-d73a4a" alt="Report a Bug"></a>
+  <a href="#requirements--installation"><img src="https://img.shields.io/badge/macOS-14.0%2B%20(arm64)-000000?logo=apple" alt="macOS 14.0+ (arm64)"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/LightAndy1/LucidSQL" alt="AGPL-3.0 License"></a>
 </p>
 
 <p align="center">
